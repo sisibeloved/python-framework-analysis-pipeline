@@ -571,7 +571,59 @@ PyFlink adapter 第一版只需要声明：
 
 这批任务完成后，才考虑 SSH 自动执行器。
 
-## 15. 需要刻意避免的错误抽象
+## 15. 真实环境验证反馈（2026-04-15）
+
+在 kunpeng (aarch64) 和 zen5 (x86_64) 上进行了真实部署验证，发现以下假设偏差：
+
+### 15.1 容器化优先假设
+
+第一版 adapter 假设宿主机需要 Java、Python、pip、PyFlink，生成的 plan steps 包括 `check-java`、`probe-python`、`install-pyflink`（pip install）。
+
+**实际情况**：纯容器方案下，宿主机只需要 Docker。Java、Flink、Python 全部在容器镜像内。宿主机不应该安装任何框架运行时。
+
+**修正**：
+- adapter 不再生成宿主机 pip install 步骤
+- readiness check 改为 `docker exec` 验证集群健康
+- probe 步骤只保留 OS、CPU、磁盘空间（宿主机层面）
+
+### 15.2 单机集群模式
+
+第一版 environment.yaml 假设每台角色在不同物理机上（client、jm、tm 各有独立 hostRef）。
+
+**实际情况**：两台物理机各跑完整的 1JM+2TM Docker 集群，所有角色在同一台机器上通过 Docker network 通信。
+
+**修正**：
+- environment.yaml 允许多个 role 指向同一个 hostRef
+- adapter 识别同宿主场景，生成 Docker network 创建 + 容器启动步骤
+- 不再需要多机 SSH 互通
+
+### 15.3 磁盘空间检查
+
+kunpeng 磁盘使用 96%，差点无法拉取 Docker 镜像。第一版 plan 没有磁盘空间检查。
+
+**修正**：增加磁盘空间 probe 步骤，Docker pull 前检查可用空间。
+
+### 15.4 Docker 可能需要安装
+
+zen5 原本没有 Docker，需要 `dnf install docker-ce`。
+
+**修正**：当 `capabilities.docker` 为 false 时，plan 应生成 Docker 安装步骤（`docker-install` kind）。
+
+### 15.5 capabilities 字段简化
+
+真实环境的 capabilities 与原草案不同：两台都是 root 权限、都有公网、都可以上传下载。
+
+**修正**：environment.yaml 的 hostRef 用 SSH alias 代替 addressRef/secretRef（SSH config 已配好），去掉不存在的中间引用。
+
+### 15.6 environment.yaml schema 需扩展
+
+- `software` 应支持 `flinkImage` 字段（指定 Docker 镜像）
+- `software` 应支持 `clusterTopology` 字段（如 `1jm-2tm`）
+- `software` 应支持 `containerNetwork` 字段
+- `hostRefs` 应支持 `alias` 字段（SSH config 中的 Host 别名）
+- `hostRefs` 去掉 `user` 必填（SSH config 可能已包含 user）
+
+## 16. 需要刻意避免的错误抽象
 
 - 不要把 `ssh user@host command` 字符串散落在框架 adapter 中。
 - 不要把 Docker 安装写成 PyFlink 专用能力。

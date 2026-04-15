@@ -2,114 +2,56 @@ schemaVersion: 1
 framework: pyflink
 mode: plan-only
 
+# 单机 Docker 集群模式：每台物理机运行 1JM + 2TM 容器
+# client/jm/tm 角色在同一台机器上用 Docker network 通信
+# 宿主机只需要 Docker，Java/Python/Flink 全部在容器内
+
 platforms:
   - id: arm
     arch: aarch64
     hosts:
       - role: client
-        hostRef: arm-client
+        hostRef: kunpeng
       - role: jobmanager
-        hostRef: arm-jm
+        hostRef: kunpeng
       - role: taskmanager
-        hostRef: arm-tm-01
+        hostRef: kunpeng
 
   - id: x86
     arch: x86_64
     hosts:
       - role: client
-        hostRef: x86-client
+        hostRef: zen5
       - role: jobmanager
-        hostRef: x86-jm
+        hostRef: zen5
       - role: taskmanager
-        hostRef: x86-tm-01
+        hostRef: zen5
 
 software:
-  pythonVersion: "3.11"
-  frameworkVersion: "pyflink-source-revision"
+  flinkImage: flink:1.20.1-java17
   dockerRequired: true
-  dependencyLock: requirements.lock
+  clusterTopology: 1jm-2tm
+  containerNetwork: flink-network
 
 hostRefs:
-  arm-client:
+  kunpeng:
     connect: ssh
-    user: benchmark
-    addressRef: arm-client-address
-    secretRef: arm-lab-ssh-key
+    alias: kunpeng
     capabilities:
       ssh: true
-      sudo: false
+      sudo: true
       docker: true
-      internet: false
-      internalMirror: true
+      internet: true
       upload: true
-      download: false
+      download: true
 
-  arm-jm:
+  zen5:
     connect: ssh
-    user: benchmark
-    addressRef: arm-jm-address
-    secretRef: arm-lab-ssh-key
+    alias: zen5
     capabilities:
       ssh: true
-      sudo: false
+      sudo: true
       docker: true
-      internet: false
-      internalMirror: true
+      internet: true
       upload: true
-      download: false
-
-  arm-tm-01:
-    connect: ssh
-    user: benchmark
-    addressRef: arm-tm-01-address
-    secretRef: arm-lab-ssh-key
-    capabilities:
-      ssh: true
-      sudo: false
-      docker: true
-      internet: false
-      internalMirror: true
-      upload: true
-      download: false
-
-  x86-client:
-    connect: ssh
-    user: benchmark
-    addressRef: x86-client-address
-    secretRef: x86-lab-ssh-key
-    capabilities:
-      ssh: true
-      sudo: false
-      docker: true
-      internet: false
-      internalMirror: true
-      upload: true
-      download: false
-
-  x86-jm:
-    connect: ssh
-    user: benchmark
-    addressRef: x86-jm-address
-    secretRef: x86-lab-ssh-key
-    capabilities:
-      ssh: true
-      sudo: false
-      docker: true
-      internet: false
-      internalMirror: true
-      upload: true
-      download: false
-
-  x86-tm-01:
-    connect: ssh
-    user: benchmark
-    addressRef: x86-tm-01-address
-    secretRef: x86-lab-ssh-key
-    capabilities:
-      ssh: true
-      sudo: false
-      docker: true
-      internet: false
-      internalMirror: true
-      upload: true
-      download: false
+      download: true

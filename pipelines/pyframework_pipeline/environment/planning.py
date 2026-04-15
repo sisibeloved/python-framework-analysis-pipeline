@@ -122,11 +122,14 @@ def generate_plan(
         mode=env_config.get("mode", "plan-only"),
     )
 
-    # Generic probe steps (one per host role)
+    # Generic probe steps — deduplicate by host (single machine may have multiple roles)
+    seen_hosts: set[str] = set()
     for host_entry in platform_config.get("hosts", []):
         host_ref = host_entry["hostRef"]
-        role = host_entry["role"]
-        _add_generic_probes(plan, host_ref, role, host_refs.get(host_ref, {}))
+        if host_ref in seen_hosts:
+            continue
+        seen_hosts.add(host_ref)
+        _add_generic_probes(plan, host_ref, host_refs.get(host_ref, {}))
 
     # Framework-specific steps from adapter
     if hasattr(adapter, "get_plan_steps"):
@@ -144,43 +147,47 @@ def generate_plan(
 def _add_generic_probes(
     plan: EnvironmentPlan,
     host_ref: str,
-    role: str,
     host_config: dict[str, Any],
 ) -> None:
-    """Add generic environment probe steps for a host."""
+    """Add generic host-level probe steps.
+
+    These probes only check host-level facts (OS, CPU, disk, Docker).
+    No Java or Python probes — those are container-internal concerns.
+    """
     capabilities = host_config.get("capabilities", {})
+    host_alias = host_config.get("alias", host_ref)
 
     plan.steps.append(PlanStep(
-        id=f"probe-os-{role}",
+        id=f"probe-os-{host_ref}",
         kind="probe",
         hostRef=host_ref,
         command="uname -a && cat /etc/os-release",
-        description=f"Probe OS info on {role} ({host_ref})",
+        description=f"Probe OS info on {host_alias}",
     ))
 
     plan.steps.append(PlanStep(
-        id=f"probe-cpu-{role}",
+        id=f"probe-cpu-{host_ref}",
         kind="probe",
         hostRef=host_ref,
         command="lscpu | grep -E 'Architecture|CPU\\(s\\)|Model name|Thread|Core|Socket'",
-        description=f"Probe CPU info on {role} ({host_ref})",
+        description=f"Probe CPU info on {host_alias}",
     ))
 
     plan.steps.append(PlanStep(
-        id=f"probe-python-{role}",
+        id=f"probe-disk-{host_ref}",
         kind="probe",
         hostRef=host_ref,
-        command="python3 --version && which python3",
-        description=f"Probe Python version on {role} ({host_ref})",
+        command="df -h / && free -h",
+        description=f"Check disk space and memory on {host_alias}",
     ))
 
     if capabilities.get("docker"):
         plan.steps.append(PlanStep(
-            id=f"check-docker-{role}",
+            id=f"check-docker-{host_ref}",
             kind="check",
             hostRef=host_ref,
-            command="docker --version && docker info --format '{{.OperatingSystem}}'",
-            description=f"Check Docker on {role} ({host_ref})",
+            command="docker --version && docker info --format '{{.ServerVersion}}'",
+            description=f"Check Docker on {host_alias}",
         ))
 
 

@@ -1,7 +1,8 @@
 """PyFlink environment adapter.
 
 Declares the framework-specific steps needed to set up a PyFlink analysis
-environment: installing PyFlink, starting a cluster, and verifying readiness.
+environment in Docker containers (1 JM + N TM), with readiness verification
+via the Flink REST API.
 """
 
 from __future__ import annotations
@@ -10,13 +11,19 @@ from typing import Any
 
 from pyframework_pipeline.environment.planning import PlanStep
 
+DEFAULT_IMAGE = "flink:1.20.1-java17"
+DEFAULT_NETWORK = "flink-network"
+DEFAULT_TM_COUNT = 2
+
 
 class PyFlinkEnvironmentAdapter:
-    """Generates PyFlink-specific environment plan steps."""
+    """Generates PyFlink-specific environment plan steps.
+
+    Assumes a containerised deployment: Flink runs in Docker containers,
+    the host only needs Docker. No Java/Python/pip on the host.
+    """
 
     framework_id = "pyflink"
-
-    ROLES = ("client", "jobmanager", "taskmanager")
 
     def get_plan_steps(
         self,
@@ -28,67 +35,106 @@ class PyFlinkEnvironmentAdapter:
         """Return framework-specific plan steps for PyFlink."""
         steps: list[PlanStep] = []
 
+        image = software.get("flinkImage", DEFAULT_IMAGE)
+        network = software.get("containerNetwork", DEFAULT_NETWORK)
+        tm_count = DEFAULT_TM_COUNT
+        topology = software.get("clusterTopology", "")
+        if topology:
+            parts = topology.split("-")
+            for p in parts:
+                if p.endswith("tm"):
+                    try:
+                        tm_count = int(p[:-2])
+                    except ValueError:
+                        pass
+
+        # Determine the host (all roles on same machine in single-node mode)
         hosts_by_role = {}
         for host_entry in platform_config.get("hosts", []):
             hosts_by_role[host_entry["role"]] = host_entry["hostRef"]
 
-        client_ref = hosts_by_role.get("client", "")
-        jm_ref = hosts_by_role.get("jobmanager", client_ref)
-        tm_ref = hosts_by_role.get("taskmanager", client_ref)
+        host = hosts_by_role.get("jobmanager", hosts_by_role.get("client", ""))
+        host_alias = host_refs.get(host, {}).get("alias", host)
 
-        # Install PyFlink on client
+        # Step 1: Create Docker network
         steps.append(PlanStep(
-            id="install-pyflink",
-            kind="framework-install",
-            hostRef=client_ref,
-            command="pip install apache-flink",
-            description="Install PyFlink on client host",
+            id="create-network",
+            kind="prepare",
+            hostRef=host,
+            command=f"docker network create {network} 2>/dev/null || true",
+            description=f"Create Docker network '{network}' on {host_alias}",
+        ))
+
+        # Step 2: Pull Flink image
+        steps.append(PlanStep(
+            id="pull-flink-image",
+            kind="prepare",
+            hostRef=host,
+            command=f"docker pull {image}",
+            description=f"Pull Flink image {image} on {host_alias}",
             mutatesHost=True,
             requiresApproval=True,
-            rollbackHint="pip uninstall apache-flink",
+            rollbackHint=f"docker rmi {image}",
         ))
 
-        # Check Java on JM
+        # Step 3: Start JobManager
         steps.append(PlanStep(
-            id="check-java-jm",
-            kind="check",
-            hostRef=jm_ref,
-            command="java -version",
-            description="Check Java on JobManager",
+            id="start-jobmanager",
+            kind="framework-start",
+            hostRef=host,
+            command=(
+                f"docker run -d --name flink-jm --network {network} "
+                f"-e FLINK_PROPERTIES='jobmanager.rpc.address: flink-jm' "
+                f"-p 8081:8081 {image} jobmanager"
+            ),
+            description=f"Start JobManager container on {host_alias}",
+            mutatesHost=True,
+            requiresApproval=True,
+            rollbackHint="docker rm -f flink-jm",
         ))
 
-        # Check Java on TM
-        if tm_ref != jm_ref:
+        # Step 4: Start TaskManagers
+        for i in range(1, tm_count + 1):
             steps.append(PlanStep(
-                id="check-java-tm",
-                kind="check",
-                hostRef=tm_ref,
-                command="java -version",
-                description="Check Java on TaskManager",
+                id=f"start-taskmanager-{i}",
+                kind="framework-start",
+                hostRef=host,
+                command=(
+                    f"docker run -d --name flink-tm{i} --network {network} "
+                    f"-e FLINK_PROPERTIES='jobmanager.rpc.address: flink-jm' "
+                    f"{image} taskmanager"
+                ),
+                description=f"Start TaskManager {i} container on {host_alias}",
+                mutatesHost=True,
+                requiresApproval=True,
+                rollbackHint=f"docker rm -f flink-tm{i}",
             ))
 
-        # Readiness: import PyFlink
+        # Step 5: Readiness — check cluster overview via REST API
         steps.append(PlanStep(
-            id="readiness-pyflink-import",
+            id="readiness-cluster-health",
             kind="framework-readiness",
-            hostRef=client_ref,
-            command='python3 -c "from pyflink.table import StreamTableEnvironment; print(\'OK\')"',
-            description="Verify PyFlink can be imported",
+            hostRef=host,
+            command=(
+                "docker exec flink-jm curl -sf "
+                "http://localhost:8081/overview"
+            ),
+            description=f"Check Flink cluster health on {host_alias}",
         ))
 
-        # Readiness: submit minimal batch job
+        # Step 6: Readiness — verify TM count
         steps.append(PlanStep(
-            id="readiness-mini-job",
+            id="readiness-taskmanager-count",
             kind="framework-smoke-test",
-            hostRef=client_ref,
-            command="python3 -c \""
-            "from pyflink.datastream import StreamExecutionEnvironment; "
-            "from pyflink.table import StreamTableEnvironment; "
-            "env = StreamExecutionEnvironment.get_execution_environment(); "
-            "t_env = StreamTableEnvironment.create(env); "
-            "t_env.execute_sql('SELECT 1').print(); "
-            "print('SMOKE_TEST_OK')\"",
-            description="Submit minimal PyFlink batch job",
+            hostRef=host,
+            command=(
+                f"docker exec flink-jm curl -sf "
+                f"http://localhost:8081/taskmanagers | "
+                f"python3 -c \"import sys,json; d=json.load(sys.stdin); "
+                f"assert len(d.get('taskmanagers',[])) >= {tm_count}, "
+                f"f'TM count {{len(d.get(\\\"taskmanagers\\\",[]))}} < {tm_count}'\""
+            ),
+            description=f"Verify {tm_count} TaskManagers registered on {host_alias}",
         ))
 
         return steps

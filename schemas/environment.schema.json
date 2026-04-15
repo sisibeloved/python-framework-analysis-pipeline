@@ -65,21 +65,31 @@
     },
     "software": {
       "type": "object",
-      "required": ["pythonVersion"],
       "additionalProperties": false,
       "properties": {
-        "pythonVersion": {
+        "flinkImage": {
           "type": "string",
-          "minLength": 1,
-          "description": "Required Python version, e.g. 3.11."
-        },
-        "frameworkVersion": {
-          "type": "string",
-          "description": "Framework version or source revision."
+          "description": "Flink Docker image, e.g. flink:1.20.1-java17."
         },
         "dockerRequired": {
           "type": "boolean",
           "default": false
+        },
+        "clusterTopology": {
+          "type": "string",
+          "description": "Cluster layout, e.g. 1jm-2tm."
+        },
+        "containerNetwork": {
+          "type": "string",
+          "description": "Docker network name for the cluster."
+        },
+        "pythonVersion": {
+          "type": "string",
+          "description": "Required Python version (only for non-container deployments)."
+        },
+        "frameworkVersion": {
+          "type": "string",
+          "description": "Framework version or source revision."
         },
         "dependencyLock": {
           "type": "string",
@@ -91,13 +101,17 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["connect", "user"],
+        "required": ["connect"],
         "additionalProperties": false,
         "properties": {
           "connect": {
             "type": "string",
             "enum": ["ssh", "local"],
             "description": "Connection method."
+          },
+          "alias": {
+            "type": "string",
+            "description": "SSH config Host alias, if pre-configured."
           },
           "user": {
             "type": "string",

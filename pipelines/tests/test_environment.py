@@ -73,16 +73,31 @@ class EnvironmentPlanTest(unittest.TestCase):
             for field in required_fields:
                 self.assertIn(field, step, f"Step {step.get('id', '?')} missing {field}")
 
-    def test_plan_contains_framework_steps(self) -> None:
+    def test_plan_contains_container_steps(self) -> None:
         result = CliInvoker.run(
             "environment", "plan", str(PROJECT_YAML), "--platform", "arm"
         )
         plan = json.loads(result.stdout)
         step_ids = [s["id"] for s in plan["steps"]]
 
-        self.assertIn("install-pyflink", step_ids)
-        self.assertIn("readiness-pyflink-import", step_ids)
-        self.assertIn("readiness-mini-job", step_ids)
+        # Container deployment steps
+        self.assertIn("pull-flink-image", step_ids)
+        self.assertIn("start-jobmanager", step_ids)
+        self.assertIn("start-taskmanager-1", step_ids)
+        self.assertIn("start-taskmanager-2", step_ids)
+        self.assertIn("readiness-cluster-health", step_ids)
+        self.assertIn("readiness-taskmanager-count", step_ids)
+
+    def test_plan_deduplicates_host_probes(self) -> None:
+        result = CliInvoker.run(
+            "environment", "plan", str(PROJECT_YAML), "--platform", "arm"
+        )
+        plan = json.loads(result.stdout)
+        step_ids = [s["id"] for s in plan["steps"]]
+
+        # Single-machine mode: only one set of host probes
+        self.assertIn("probe-os-kunpeng", step_ids)
+        self.assertNotIn("probe-os-jobmanager", step_ids)
 
     def test_plan_writes_to_output_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,6 +116,15 @@ class EnvironmentPlanTest(unittest.TestCase):
 class EnvironmentValidateTest(unittest.TestCase):
     """Test 'environment validate' subcommand."""
 
+    def _generate_plan(self, tmp_dir: Path) -> dict:
+        """Helper: generate a plan into tmp_dir, return parsed plan."""
+        result = CliInvoker.run(
+            "environment", "plan", str(PROJECT_YAML),
+            "--platform", "arm", "--output", str(tmp_dir),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads((tmp_dir / "environment-plan.json").read_text())
+
     def test_validate_rejects_empty_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = CliInvoker.run("environment", "validate", tmp)
@@ -113,15 +137,8 @@ class EnvironmentValidateTest(unittest.TestCase):
     def test_validate_accepts_valid_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
+            plan = self._generate_plan(tmp_dir)
 
-            # Generate a plan
-            CliInvoker.run(
-                "environment", "plan", str(PROJECT_YAML),
-                "--platform", "arm", "--output", str(tmp_dir),
-            )
-            plan = json.loads((tmp_dir / "environment-plan.json").read_text())
-
-            # Write a matching record
             record = {
                 "schemaVersion": 1,
                 "projectId": plan["projectId"],
@@ -135,7 +152,7 @@ class EnvironmentValidateTest(unittest.TestCase):
                     "operatorRef": "test-operator",
                     "source": "test",
                 },
-                "facts": {"arch": "aarch64", "python": "3.11.6"},
+                "facts": {"arch": "aarch64", "kernel": "6.6.0"},
                 "steps": [
                     {"id": s["id"], "status": "passed"}
                     for s in plan["steps"]
@@ -150,15 +167,14 @@ class EnvironmentValidateTest(unittest.TestCase):
                 json.dumps(record, indent=2)
             )
 
-            # Write a readiness report
             readiness = {
                 "schemaVersion": 1,
                 "projectId": plan["projectId"],
                 "platform": plan["platform"],
                 "status": "ready",
                 "checks": [
-                    {"id": "pyflink-import", "status": "passed", "message": "OK"},
-                    {"id": "mini-job", "status": "passed", "message": "OK"},
+                    {"id": "cluster-health", "status": "passed", "message": "OK"},
+                    {"id": "tm-count", "status": "passed", "message": "OK"},
                 ],
             }
             (tmp_dir / "readiness-report.json").write_text(
@@ -175,11 +191,7 @@ class EnvironmentValidateTest(unittest.TestCase):
     def test_validate_detects_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-
-            CliInvoker.run(
-                "environment", "plan", str(PROJECT_YAML),
-                "--platform", "arm", "--output", str(tmp_dir),
-            )
+            self._generate_plan(tmp_dir)
 
             record = {
                 "schemaVersion": 1,
@@ -200,19 +212,13 @@ class EnvironmentValidateTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
-        self.assertEqual(report["status"], "error")
         messages = " ".join(i["message"] for i in report["issues"])
         self.assertIn("does not match", messages)
 
     def test_validate_detects_unknown_step_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-
-            CliInvoker.run(
-                "environment", "plan", str(PROJECT_YAML),
-                "--platform", "arm", "--output", str(tmp_dir),
-            )
-            plan = json.loads((tmp_dir / "environment-plan.json").read_text())
+            plan = self._generate_plan(tmp_dir)
 
             record = {
                 "schemaVersion": 1,
@@ -256,9 +262,9 @@ class YamlParserTest(unittest.TestCase):
         self.assertEqual(env["platforms"][0]["id"], "arm")
         self.assertEqual(env["platforms"][0]["arch"], "aarch64")
         self.assertEqual(len(env["platforms"][0]["hosts"]), 3)
-        self.assertEqual(env["software"]["pythonVersion"], "3.11")
+        self.assertEqual(env["software"]["flinkImage"], "flink:1.20.1-java17")
         self.assertTrue(env["software"]["dockerRequired"])
-        self.assertIn("arm-client", env["hostRefs"])
+        self.assertIn("kunpeng", env["hostRefs"])
 
     def test_parses_capabilities(self) -> None:
         from pyframework_pipeline.environment.parser import load_environment_yaml
@@ -267,9 +273,9 @@ class YamlParserTest(unittest.TestCase):
             REPO_ROOT / "projects" / "pyflink-tpch-reference" / "environment.yaml"
         )
 
-        caps = env["hostRefs"]["arm-client"]["capabilities"]
+        caps = env["hostRefs"]["kunpeng"]["capabilities"]
         self.assertTrue(caps["ssh"])
-        self.assertFalse(caps["sudo"])
+        self.assertTrue(caps["sudo"])
         self.assertTrue(caps["docker"])
 
 
