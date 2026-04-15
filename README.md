@@ -7,6 +7,7 @@
 - 一组 PyFlink 专用分析规范
 - 一套前端 demo
 - 一份示例数据包
+- 一套自动化分析流程的初始 CLI 骨架
 
 仓库的目标不是长期停留在“单一 PyFlink 报告”，而是演进到一套可复用于不同 Python 框架的软件分析流程。
 
@@ -44,7 +45,13 @@
   - 四层抽象方案
   - 报告 schema 与页面规范
 - `docs/plans/`
-  - 前端实现计划与阶段性设计记录
+  - 前端实现计划、自动化流程路线图与阶段性设计记录
+- `schemas/`
+  - 四层输入和校验报告的 JSON Schema 草案
+- `pipelines/`
+  - 自动化分析流程 CLI、校验器、步骤接口和框架适配器
+- `projects/`
+  - 真实分析项目的配置、采集产物和运行记录
 - `web/`
   - 前端 demo
 - `web/public/examples/four-layer/`
@@ -54,9 +61,22 @@
 
 ## 后续方向
 
-- 将 schema 进一步落成 JSON Schema 或类型模型
+- 根据真实实机数据回看并收紧 JSON Schema
+- 打通环境搭建、用例生成、采集、回填的最小自动化闭环
 - 扩充更多 Python 框架的四层示例输入
 - 继续完善正式汇报 demo 的页面表达与证据对比能力
+
+## Pipeline CLI
+
+当前 CLI 先提供四层输入的跨引用校验，用来保证 `Framework / Dataset / Source / Project` 之间的绑定关系没有断链。
+
+```bash
+PYTHONPATH=pipelines python3 -m pyframework_pipeline --help
+PYTHONPATH=pipelines python3 -m pyframework_pipeline validate examples/four-layer/pyflink-reference
+PYTHONPATH=pipelines python3 -m pyframework_pipeline validate projects/pyflink-tpch-reference/project.yaml
+```
+
+第一版不引入外部 Python 依赖，`project.yaml` 只支持当前项目配置需要的简单 `key: value` 格式。
 
 ## 前端应用
 

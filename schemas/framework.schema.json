@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.local/python-framework-analysis-pipeline/framework.schema.json",
+  "title": "Framework",
+  "type": "object",
+  "required": ["id", "name", "analysisScope", "metricDefinitions", "taxonomy"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "analysisScope": {
+      "type": "array"
+    },
+    "excludedScope": {
+      "type": "array"
+    },
+    "metricDefinitions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "taxonomy": {
+      "type": "object",
+      "required": ["components", "categoriesL1"],
+      "properties": {
+        "components": {
+          "type": "array"
+        },
+        "categoriesL1": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

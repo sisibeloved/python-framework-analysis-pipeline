@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.local/python-framework-analysis-pipeline/dataset.schema.json",
+  "title": "Dataset",
+  "type": "object",
+  "required": ["id", "frameworkId", "cases", "stackOverview", "functions", "patterns", "rootCauses"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "frameworkId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "additionalProperties": true
+      }
+    },
+    "stackOverview": {
+      "type": "object",
+      "required": ["components", "categories"],
+      "additionalProperties": true
+    },
+    "functions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "symbol"],
+        "additionalProperties": true
+      }
+    },
+    "patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title"],
+        "additionalProperties": true
+      }
+    },
+    "rootCauses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title"],
+        "additionalProperties": true
+      }
+    }
+  }
+}

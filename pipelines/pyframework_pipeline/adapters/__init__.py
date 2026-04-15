@@ -1,0 +1,1 @@
+"""Framework-specific pipeline adapters."""

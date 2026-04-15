@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.local/python-framework-analysis-pipeline/project.schema.json",
+  "title": "Project",
+  "type": "object",
+  "required": ["id", "name", "frameworkRef", "datasetRef", "sourceRef"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "frameworkRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "datasetRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "caseBindings": {
+      "type": "array"
+    },
+    "functionBindings": {
+      "type": "array"
+    },
+    "patternBindings": {
+      "type": "array"
+    },
+    "rootCauseBindings": {
+      "type": "array"
+    }
+  }
+}
