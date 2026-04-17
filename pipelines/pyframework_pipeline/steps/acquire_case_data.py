@@ -1,5 +1,5 @@
-"""Step 5: acquire data required by generated test cases.
+"""Step 5 (legacy): acquired by acquire_data.py.
 
-This step owns input data manifests and reproducible dataset generation records.
-It does not write report view models directly.
+This module is retained as a redirect. The actual implementation lives in
+``pipelines/pyframework_pipeline/acquisition/``.
 """

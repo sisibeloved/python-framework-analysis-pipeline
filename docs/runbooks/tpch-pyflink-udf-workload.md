@@ -116,4 +116,4 @@ SQL = "SELECT SUM(udf_q06(...)) AS revenue FROM lineitem"
 
 - 在 `workload/tpch/` 下增加 `pyspark/` 目录，实现 PySpark 版 UDF
 - 在 `workload/` 下增加其他 benchmark（例如 TPC-DS）
-- 增加 timing 采集包装，对接第 6 步"性能采集数据获取"
+- 增加 timing 采集包装，对接第 5 步"数据采集"
