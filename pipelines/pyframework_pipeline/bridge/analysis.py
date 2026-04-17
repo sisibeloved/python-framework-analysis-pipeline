@@ -412,41 +412,165 @@ def fetch(
 # ---------------------------------------------------------------------------
 
 def _backfill_diff_view(func: dict, parsed: ParsedAnalysis) -> None:
-    """Populate func["diffView"] from a parsed analysis comment."""
+    """Populate func["diffView"] from a parsed analysis comment.
+
+    Produces a structure compatible with the frontend ``FunctionDetail.diffView``
+    type: top-level ``functionId``, ``sourceFile``, ``sourceLocation``,
+    ``diffGuide``, and ``analysisBlocks`` with armRegions/x86Regions/mappings.
+    """
     blocks: list[dict[str, Any]] = []
     for idx, sec in enumerate(parsed.sections):
+        body = sec.get("body", "")
+        table = sec.get("table", [])
+
+        # Split the section body into ARM and x86 code regions.
+        arm_snippets = _extract_code_blocks(body, arm=True)
+        x86_snippets = _extract_code_blocks(body, arm=False)
+
+        arm_regions = [
+            {
+                "id": f"arm_{idx:03d}_{j:03d}",
+                "label": f"ARM snippet {j + 1}",
+                "location": "",
+                "role": "code",
+                "snippet": s,
+                "highlights": _extract_mnemonics(s),
+                "defaultExpanded": j == 0,
+            }
+            for j, s in enumerate(arm_snippets)
+        ]
+        x86_regions = [
+            {
+                "id": f"x86_{idx:03d}_{j:03d}",
+                "label": f"x86 snippet {j + 1}",
+                "location": "",
+                "role": "code",
+                "snippet": s,
+                "highlights": _extract_mnemonics(s),
+                "defaultExpanded": j == 0,
+            }
+            for j, s in enumerate(x86_snippets)
+        ]
+
+        # Build mappings from comparison table rows.
+        mappings: list[dict[str, Any]] = []
+        if table:
+            first_row = table[0]
+            mappings.append({
+                "id": f"map_{idx:03d}",
+                "label": sec.get("title", f"Section {idx + 1}"),
+                "sourceAnchorIds": [],
+                "armRegionIds": [r["id"] for r in arm_regions],
+                "x86RegionIds": [r["id"] for r in x86_regions],
+                "note": first_row.get("差异", first_row.get("ARM劣势", "")),
+            })
+
+        # Diff signals from table rows that indicate ARM disadvantage.
+        signals: list[str] = []
+        for row in table:
+            diff = row.get("差异", row.get("ARM劣势", ""))
+            if diff and diff != "无差异":
+                signals.append(diff[:80])
+
         block: dict[str, Any] = {
             "id": f"blk_{idx:03d}",
             "label": sec.get("title", f"Section {idx + 1}"),
-            "summary": "",
+            "summary": signals[0][:120] if signals else "",
             "sourceAnchors": [],
-            "armRegions": [],
-            "x86Regions": [],
-            "mappings": [],
-            "diffSignals": [],
+            "armRegions": arm_regions,
+            "x86Regions": x86_regions,
+            "mappings": mappings,
+            "diffSignals": signals[:5],
+            "alignmentNote": "",
+            "performanceNote": signals[0] if signals else "",
             "defaultExpanded": idx < 3,
         }
-
-        # If there's a comparison table, extract diff signals.
-        table = sec.get("table", [])
-        if table:
-            signals: list[str] = []
-            for row in table:
-                diff = row.get("差异", row.get("ARM劣势", ""))
-                if diff and diff != "无差异":
-                    signals.append(diff[:80])
-            block["diffSignals"] = signals[:5]
-            if signals:
-                block["summary"] = signals[0][:120]
-
         blocks.append(block)
 
     func["diffView"] = {
         "functionId": func.get("id", ""),
+        "sourceFile": "",
+        "sourceLocation": "",
+        "diffGuide": "由 LLM 评论自动生成，按逐行对照分析分段。",
         "analysisBlocks": blocks,
-        "parsedFrom": "bridge-comment",
-        "parsedAt": _now_iso(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Code-block extraction helpers
+# ---------------------------------------------------------------------------
+
+_ARM_LABELS = ("kunpeng", "arm", "aarch64")
+_X86_LABELS = ("zen", "x86", "x86_64", "amd64")
+
+
+def _extract_code_blocks(text: str, arm: bool) -> list[str]:
+    """Extract code blocks labelled for the given platform from markdown text.
+
+    Looks for patterns like ``### Kunpeng`` or ``ARM:`` followed by a fenced
+    code block, or plain code blocks under a platform heading.
+    """
+    import re
+
+    labels = _ARM_LABELS if arm else _X86_LABELS
+    lines = text.split("\n")
+    blocks: list[str] = []
+    current_block: list[str] = []
+    in_code_fence = False
+    in_platform_section = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect platform section heading (### Kunpeng / ### Zen4 / etc.)
+        if stripped.startswith("#"):
+            heading_lower = stripped.lower()
+            is_target = any(lbl in heading_lower for lbl in labels)
+            if is_target:
+                in_platform_section = True
+                continue
+            elif in_platform_section and not is_target:
+                # Hit a different heading — flush current block.
+                in_platform_section = False
+                if current_block:
+                    blocks.append("\n".join(current_block))
+                    current_block = []
+
+        # Detect fenced code blocks.
+        if stripped.startswith("```"):
+            if in_code_fence:
+                # End of code block.
+                in_code_fence = False
+                if current_block:
+                    blocks.append("\n".join(current_block))
+                    current_block = []
+            else:
+                in_code_fence = True
+            continue
+
+        if in_code_fence and in_platform_section:
+            current_block.append(line)
+
+    # Flush trailing block.
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    return blocks
+
+
+def _extract_mnemonics(snippet: str) -> list[str]:
+    """Extract instruction mnemonics from assembly text for highlighting."""
+    mnemonics: list[str] = []
+    for line in snippet.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(";") or stripped.startswith("//"):
+            continue
+        parts = stripped.split()
+        if parts:
+            mnemonic = parts[0].rstrip(":")
+            if mnemonic and mnemonic not in mnemonics:
+                mnemonics.append(mnemonic)
+    return mnemonics[:10]
 
 
 def _merge_list(
