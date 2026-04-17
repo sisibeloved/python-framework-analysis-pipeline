@@ -76,6 +76,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     acquire_sub = acquire_parser.add_subparsers(dest="acquire_command", required=True)
 
+    # bridge
+    bridge_parser = subparsers.add_parser(
+        "bridge",
+        help="差异分析 Issue 桥接相关命令。",
+    )
+    bridge_sub = bridge_parser.add_subparsers(
+        dest="bridge_command", required=True,
+    )
+
+    # bridge publish
+    br_pub = bridge_sub.add_parser(
+        "publish",
+        help="发布分析 Issue（每函数一个）。",
+    )
+    br_pub.add_argument("project", help="project.yaml 路径")
+    br_pub.add_argument("--repo", required=True, help="owner/repo")
+    br_pub.add_argument(
+        "--platform", required=True, choices=["github", "gitcode"],
+        help="目标平台",
+    )
+    br_pub.add_argument("--token", required=True, help="API token")
+    br_pub.add_argument("--dry-run", action="store_true", help="只生成不发布")
+    br_pub.add_argument("--max-lines", type=int, default=2000, help="最大汇编行数")
+    br_pub.add_argument("--base-url", help="覆盖默认 API base URL")
+
+    # bridge fetch
+    br_fetch = bridge_sub.add_parser(
+        "fetch",
+        help="拉取分析评论并回填 Dataset。",
+    )
+    br_fetch.add_argument("project", help="project.yaml 路径")
+    br_fetch.add_argument("--repo", required=True, help="owner/repo")
+    br_fetch.add_argument(
+        "--platform", required=True, choices=["github", "gitcode"],
+        help="目标平台",
+    )
+    br_fetch.add_argument("--token", required=True, help="API token")
+    br_fetch.add_argument("--base-url", help="覆盖默认 API base URL")
+
+    # bridge status
+    br_status = bridge_sub.add_parser(
+        "status",
+        help="查看桥接状态。",
+    )
+    br_status.add_argument("project", help="project.yaml 路径")
+
     # backfill
     backfill_parser = subparsers.add_parser(
         "backfill",
@@ -180,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "backfill":
         return _handle_backfill(args)
+
+    if args.command == "bridge":
+        return _handle_bridge(args)
 
     parser.print_help(sys.stderr)
     return 2
@@ -472,4 +521,77 @@ def _cmd_backfill_status(args) -> int:
         info["dataset"]["hasStackOverview"] = bool(ds.get("stackOverview"))
 
     print(json.dumps(info, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _handle_bridge(args) -> int:
+    if args.bridge_command == "publish":
+        return _cmd_bridge_publish(args)
+    if args.bridge_command == "fetch":
+        return _cmd_bridge_fetch(args)
+    if args.bridge_command == "status":
+        return _cmd_bridge_status(args)
+    return 2
+
+
+def _cmd_bridge_publish(args) -> int:
+    from .bridge.analysis import publish
+
+    project_path = Path(args.project)
+    if not project_path.exists():
+        print(f"Error: {project_path} not found", file=sys.stderr)
+        return 1
+
+    try:
+        result = publish(
+            project_path,
+            repo=args.repo,
+            platform=args.platform,
+            token=args.token,
+            dry_run=args.dry_run,
+            max_lines=args.max_lines,
+            base_url=args.base_url,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_bridge_fetch(args) -> int:
+    from .bridge.analysis import fetch
+
+    project_path = Path(args.project)
+    if not project_path.exists():
+        print(f"Error: {project_path} not found", file=sys.stderr)
+        return 1
+
+    try:
+        result = fetch(
+            project_path,
+            repo=args.repo,
+            platform=args.platform,
+            token=args.token,
+            base_url=args.base_url,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("failed", 0) == 0 else 1
+
+
+def _cmd_bridge_status(args) -> int:
+    from .bridge.analysis import status
+
+    project_path = Path(args.project)
+    if not project_path.exists():
+        print(f"Error: {project_path} not found", file=sys.stderr)
+        return 1
+
+    result = status(project_path)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
