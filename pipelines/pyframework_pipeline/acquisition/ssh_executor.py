@@ -99,9 +99,12 @@ class SshExecutor:
         """Execute a command inside a Docker container on the remote host."""
         return self.run(f"docker exec {container} {command}", timeout=timeout)
 
-    def docker_logs(self, container: str) -> str:
+    def docker_logs(self, container: str, *, tail: int | None = None) -> str:
         """Fetch Docker container logs from the remote host."""
-        result = self.run(f"docker logs {container}")
+        cmd = f"docker logs {container}"
+        if tail is not None:
+            cmd += f" --tail {tail}"
+        result = self.run(cmd)
         return result.stdout
 
     @staticmethod

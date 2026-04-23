@@ -346,7 +346,7 @@ def _run_benchmark(
     for i in range(1, tm_count + 1):
         executor.run(
             f"docker exec flink-tm{i} rm -f /tmp/perf-udf.data",
-            timeout=10,
+            timeout=30,
         )
 
     # Start perf recording inside TM1 container (system-wide within container
@@ -356,7 +356,7 @@ def _run_benchmark(
         f"nohup docker exec flink-tm1 {perf_binary} record "
         f"-F 999 -g -e task-clock -a -o /tmp/perf-udf.data "
         f">/dev/null 2>&1 &",
-        timeout=10,
+        timeout=30,
     )
 
     # Run all queries while perf is recording, capture wall-clock times.
@@ -386,7 +386,7 @@ def _run_benchmark(
                         query, wc["wallClockSeconds"], wc.get("throughputRowsPerSec", "-"))
 
         for i in range(1, tm_count + 1):
-            logs = executor.docker_logs(f"flink-tm{i}")
+            logs = executor.docker_logs(f"flink-tm{i}", tail=50)
             (platform_run_dir / f"tm-stdout-tm{i}.log").write_text(logs, encoding="utf-8")
 
         # Collect per-invocation operator timing from TM worker stats file.
@@ -398,7 +398,7 @@ def _run_benchmark(
     # Stop perf inside TM1.
     executor.run(
         "docker exec flink-tm1 bash -c 'kill -INT $(pidof perf) || true'",
-        timeout=10,
+        timeout=30,
     )
     time.sleep(2)
 
@@ -422,7 +422,7 @@ def _collect_operator_timing(
         result = executor.run(
             f"docker exec flink-tm{i} bash -c "
             f"'grep BENCHMARK_SUMMARY /opt/flink/log/taskexecutor.log 2>/dev/null | tail -1'",
-            timeout=15,
+            timeout=60,
         )
         if result.returncode == 0 and "BENCHMARK_SUMMARY" in (result.stdout or ""):
             try:
@@ -455,7 +455,7 @@ def _ensure_container_perf(
     check = executor.run(
         "docker exec flink-tm1 bash -c "
         "'ls /usr/lib/linux-tools-*/perf 2>/dev/null | sort -V | tail -1'",
-        timeout=10,
+        timeout=30,
     )
     if check.returncode == 0 and check.stdout.strip():
         return check.stdout.strip()
@@ -473,7 +473,7 @@ def _ensure_container_perf(
     check = executor.run(
         "docker exec flink-tm1 bash -c "
         "'ls /usr/lib/linux-tools-*/perf 2>/dev/null | sort -V | tail -1'",
-        timeout=10,
+        timeout=30,
     )
     if check.returncode != 0 or not check.stdout.strip():
         raise StepError("Could not install perf inside TM container")
@@ -549,7 +549,7 @@ def _find_container_perf(executor: "SshExecutor") -> str:
     result = executor.run(
         "docker exec flink-tm1 bash -c "
         "'ls /usr/lib/linux-tools-*/perf 2>/dev/null | sort -V | tail -1'",
-        timeout=10,
+        timeout=30,
     )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
@@ -652,7 +652,7 @@ def _run_perf_kits_on_remote(
 
     # Deploy scripts into container via host staging.
     host_staging = "/tmp/pyframework-perf-kits-scripts"
-    executor.run(f"rm -rf {host_staging} && mkdir -p {host_staging}", timeout=15)
+    executor.run(f"rm -rf {host_staging} && mkdir -p {host_staging}", timeout=30)
     for script_name in [
         "run_single_platform_pipeline.py",
         "perf_data_to_csv.py",
@@ -674,13 +674,13 @@ def _run_perf_kits_on_remote(
     # Copy scripts into container.
     executor.run(
         f"docker exec flink-tm1 rm -rf {container_kits}",
-        timeout=10,
+        timeout=30,
     )
     executor.run(
         f"docker cp {host_staging}/. flink-tm1:{container_kits}",
         timeout=30,
     )
-    executor.run(f"rm -rf {host_staging}", timeout=15)
+    executor.run(f"rm -rf {host_staging}", timeout=30)
 
     # Run the pipeline inside the container.
     logger.info("Running python-performance-kits pipeline inside TM container (%s)...", platform)
@@ -700,7 +700,7 @@ def _run_perf_kits_on_remote(
 
     # Collect outputs from container via host staging.
     host_output = "/tmp/pyframework-perf-kits-output"
-    executor.run(f"rm -rf {host_output}", timeout=10)
+    executor.run(f"rm -rf {host_output}", timeout=30)
     executor.run(
         f"docker cp flink-tm1:{container_output}/ {host_output}",
         timeout=60,
@@ -719,8 +719,8 @@ def _run_perf_kits_on_remote(
         logger.info("Collected %s", remote_rel)
 
     # Cleanup.
-    executor.run(f"docker exec flink-tm1 rm -rf {container_kits} {container_output}", timeout=15)
-    executor.run(f"rm -rf {host_output}", timeout=15)
+    executor.run(f"docker exec flink-tm1 rm -rf {container_kits} {container_output}", timeout=30)
+    executor.run(f"rm -rf {host_output}", timeout=30)
 
 
 def _find_task_tm(executor: "SshExecutor") -> str | None:
@@ -730,7 +730,7 @@ def _find_task_tm(executor: "SshExecutor") -> str | None:
     # Get running jobs.
     result = executor.run(
         "docker exec flink-jm curl -sf http://localhost:8081/jobs",
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0 or not result.stdout:
         return None
@@ -760,7 +760,7 @@ def _find_task_tm(executor: "SshExecutor") -> str | None:
     # Get job vertices to find task location.
     result = executor.run(
         f"docker exec flink-jm curl -sf http://localhost:8081/jobs/{job_id}",
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0 or not result.stdout:
         return None
@@ -785,7 +785,7 @@ def _find_task_tm(executor: "SshExecutor") -> str | None:
             for i in range(1, 10):
                 r = executor.run(
                     f"docker exec flink-tm{i} hostname",
-                    timeout=5,
+                    timeout=30,
                 )
                 if r.returncode == 0 and r.stdout.strip() == host:
                     return f"flink-tm{i}"
@@ -810,7 +810,7 @@ def _collect_binary_from_container(
     )
     executor.run(
         f"docker exec -u root {container} chmod 644 {staging} 2>/dev/null",
-        timeout=10,
+        timeout=30,
     )
 
     # docker cp from container to host filesystem.
@@ -826,8 +826,8 @@ def _collect_binary_from_container(
     ok = executor.fetch_file(host_tmp, local_path)
 
     # Cleanup.
-    executor.run(f"docker exec {container} rm -f {staging}", timeout=15)
-    executor.run(f"rm -f {host_tmp}", timeout=15)
+    executor.run(f"docker exec {container} rm -f {staging}", timeout=30)
+    executor.run(f"rm -f {host_tmp}", timeout=30)
 
     return ok
 
