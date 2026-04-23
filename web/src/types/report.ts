@@ -23,6 +23,14 @@ export type CaseIndexEntry = {
   tmDelta: string;
   operatorDelta: string;
   frameworkDelta: string;
+  demoArm?: string;
+  demoX86?: string;
+  tmArm?: string;
+  tmX86?: string;
+  operatorArm?: string;
+  operatorX86?: string;
+  frameworkArm?: string;
+  frameworkX86?: string;
   scale?: string;
   workloadForm?: string;
   semanticStatus?: string;

@@ -127,10 +127,10 @@ export default function CasesPage() {
           columns={[
             { key: "id", header: "用例 ID", render: (row) => <Link to={`/case/${row.id}`}>{row.id}</Link> },
             { key: "name", header: "用例名称", render: (row) => <Link to={`/case/${row.id}`}>{row.name}</Link> },
-            { key: "demo", header: "Demo 差异", render: (row) => row.demoDelta },
-            { key: "tm", header: "TM 差异", render: (row) => row.tmDelta },
-            { key: "operator", header: "业务算子差异", render: (row) => row.operatorDelta },
-            { key: "framework", header: "框架调用差异", render: (row) => row.frameworkDelta },
+            { key: "demo", header: "Demo 耗时", render: (row) => row.demoArm ? `${row.demoArm} (${row.demoDelta})` : row.demoDelta },
+            { key: "tm", header: "TM 耗时", render: (row) => row.tmArm ? `${row.tmArm} (${row.tmDelta})` : row.tmDelta },
+            { key: "operator", header: "业务算子", render: (row) => row.operatorArm ? `${row.operatorArm} (${row.operatorDelta})` : row.operatorDelta },
+            { key: "framework", header: "框架调用", render: (row) => row.frameworkArm ? `${row.frameworkArm} (${row.frameworkDelta})` : row.frameworkDelta },
           ]}
           rows={state.data}
           getRowKey={(row) => row.id}

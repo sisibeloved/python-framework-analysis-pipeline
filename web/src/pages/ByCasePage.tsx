@@ -78,7 +78,7 @@ export default function ByCasePage() {
               <div key={entry.id} className="delta-bar-list__row">
                 <div>
                   <strong><Link to={`/case/${entry.id}`}>{entry.name}</Link></strong>
-                  <p>总耗时 {entry.demoDelta} · TM {entry.tmDelta} · 业务算子 {entry.operatorDelta}</p>
+                  <p>总耗时 {entry.demoArm ?? entry.demoDelta} · TM {entry.tmArm ?? entry.tmDelta} · 业务算子 {entry.operatorArm ?? entry.operatorDelta}</p>
                 </div>
                 <div className="delta-bar-list__bar-wrap">
                   <div className="delta-bar-list__bar" style={{ width: `${width}%` }} />
@@ -93,10 +93,10 @@ export default function ByCasePage() {
         <DataTable
           columns={[
             { key: "name", header: "用例", render: (row) => <Link to={`/case/${row.id}`}>{row.name}</Link> },
-            { key: "demo", header: "总耗时", render: (row) => row.demoDelta },
-            { key: "tm", header: "TM", render: (row) => row.tmDelta },
-            { key: "operator", header: "业务算子", render: (row) => row.operatorDelta },
-            { key: "framework", header: "框架调用", render: (row) => row.frameworkDelta },
+            { key: "demo", header: "总耗时", render: (row) => row.demoArm ? `${row.demoArm} (${row.demoDelta})` : row.demoDelta },
+            { key: "tm", header: "TM", render: (row) => row.tmArm ? `${row.tmArm} (${row.tmDelta})` : row.tmDelta },
+            { key: "operator", header: "业务算子", render: (row) => row.operatorArm ? `${row.operatorArm} (${row.operatorDelta})` : row.operatorDelta },
+            { key: "framework", header: "框架调用", render: (row) => row.frameworkArm ? `${row.frameworkArm} (${row.frameworkDelta})` : row.frameworkDelta },
           ]}
           rows={state.data}
           getRowKey={(row) => row.id}
