@@ -100,19 +100,10 @@ retry() {
     return 1
 }
 
-# Install pyenv via direct git clone (avoids pyenv.run which has its own
-# uncontrolled git/curl calls that can't be individually retried)
-echo '  Installing pyenv...'
+# Install pyenv (with retry for gnutls_handshake failures)
+retry 'curl -sSL https://pyenv.run \| bash'
 export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PATH
-if [ ! -d \$PYENV_ROOT/.git ]; then
-    retry 'git clone https://github.com/pyenv/pyenv.git \$PYENV_ROOT'
-fi
-for plugin in pyenv-doctor pyenv-installer pyenv-update; do
-    if [ ! -d \$PYENV_ROOT/plugins/\$plugin/.git ]; then
-        retry \"git clone https://github.com/pyenv/\$plugin.git \$PYENV_ROOT/plugins/\$plugin\"
-    fi
-done
 eval \"\$(pyenv init -)\"
 
 # Compile Python with LTO+PGO
