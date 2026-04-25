@@ -38,7 +38,8 @@ class SshExecutor:
         args.extend(["-o", "StrictHostKeyChecking=no"])
         target = f"{self.user}@{self.host}" if self.user else self.host
         args.append(target)
-        args.append(command)
+        # Use login shell so PATH includes /usr/bin, /usr/local/bin, etc.
+        args.append(f"bash -lc {subprocess.list2cmdline([command])}")
         return args
 
     def run(self, command: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:

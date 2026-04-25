@@ -140,6 +140,8 @@ def deploy_plan(
 
         if result.returncode != 0:
             stderr_snippet = result.stderr[:500] if result.stderr else ""
+            if result.returncode == 127 and not stderr_snippet:
+                stderr_snippet = "command not found in PATH (exit 127)"
             logger.error("[Step %s] Failed (exit %d)", step_id, result.returncode)
             record_steps.append({
                 "id": step_id,
@@ -164,7 +166,14 @@ def deploy_plan(
                     "exitCode": result.returncode,
                     "stderr": stderr_snippet,
                 },
-                "record": record,
+                "record": {
+                    "schemaVersion": 1,
+                    "platform": platform_id,
+                    "startedAt": started_at,
+                    "finishedAt": _now_iso(),
+                    "mode": "full-auto",
+                    "steps": record_steps,
+                },
             }
         else:
             logger.info("[Step %s] Passed", step_id)
