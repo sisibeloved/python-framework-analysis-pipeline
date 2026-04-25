@@ -100,24 +100,23 @@ retry() {
     return 1
 }
 
-# Install pyenv — download with -k, patch internal curl calls to skip SSL too
+# Install pyenv via official Basic GitHub Checkout
 echo '  Installing pyenv...'
-retry 'curl -k -sSL -o /tmp/pyenv.run https://pyenv.run'
-sed -i 's/curl /curl -k /g' /tmp/pyenv.run
-retry 'bash /tmp/pyenv.run'
+retry 'git clone https://github.com/pyenv/pyenv.git $PYENV_ROOT'
 export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PATH
 eval \"\$(pyenv init -)\"
 
-# Pre-download Python source into pyenv cache (avoids download during install)
-echo '  Pre-downloading Python $PYTHON_VERSION source...'
+# Pre-cache Python source (pyenv auto-detects ~/.pyenv/cache)
+echo '  Pre-caching Python $PYTHON_VERSION source...'
 mkdir -p \$PYENV_ROOT/cache
 retry 'curl -k -o \$PYENV_ROOT/cache/Python-$PYTHON_VERSION.tar.xz https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz'
 
-# Compile Python with LTO+PGO
+# Compile Python with LTO+PGO (PYTHON_BUILD_CURL_OPTS is the official way to pass -k)
 echo '  Compiling Python (this takes ~40 min)...'
 CFLAGS='-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer' \
 PYTHON_CONFIGURE_OPTS='--enable-optimizations --with-lto' \
+PYTHON_BUILD_CURL_OPTS='-k' \
 MAKEOPTS='$MAKEOPTS' \
 pyenv install $PYTHON_VERSION
 
