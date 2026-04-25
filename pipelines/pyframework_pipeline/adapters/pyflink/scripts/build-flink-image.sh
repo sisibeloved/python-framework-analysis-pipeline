@@ -41,21 +41,28 @@ for var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
     fi
 done
 
+BUILD_CONTAINER="flink-build"
+
 echo "=== Building $IMAGE_NAME on $ARCH ==="
 echo "  BASE_IMAGE=$BASE_IMAGE"
 echo "  NETWORK=$NETWORK"
 echo "  PYTHON_VERSION=$PYTHON_VERSION"
 echo "  TM_COUNT=$TM_COUNT"
+echo "  BUILD_CONTAINER=$BUILD_CONTAINER"
 
 # ---------------------------------------------------------------------------
-# Phase 1: Start base container
+# Phase 1: Start or reuse build container
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 1/7] Starting base container..."
-docker network create "$NETWORK" 2>/dev/null || true
-docker rm -f flink-jm 2>/dev/null || true
-docker run -d --name flink-jm --hostname flink-jm --network "$NETWORK" -p 8081:8081 \
-    "$BASE_IMAGE" jobmanager
+if docker inspect "$BUILD_CONTAINER" >/dev/null 2>&1; then
+    echo "[Phase 1/7] Reusing existing build container '$BUILD_CONTAINER'..."
+    docker start "$BUILD_CONTAINER" 2>/dev/null || true
+else
+    echo "[Phase 1/7] Creating build container '$BUILD_CONTAINER'..."
+    docker network create "$NETWORK" 2>/dev/null || true
+    docker run -d --name "$BUILD_CONTAINER" --hostname flink-build --network "$NETWORK" \
+        "$BASE_IMAGE" jobmanager
+fi
 sleep 3
 
 # ---------------------------------------------------------------------------
@@ -65,7 +72,7 @@ echo ""
 echo "[Phase 2/7] Installing build deps and compiling Python $PYTHON_VERSION..."
 echo "  (This takes ~40 min with LTO+PGO on 4 cores)"
 
-docker exec $DOCKER_PROXY_FLAGS -u root flink-jm bash -c "
+docker exec $DOCKER_PROXY_FLAGS -u root $BUILD_CONTAINER bash -c "
 set -e
 
 # System build deps
@@ -132,7 +139,7 @@ echo "[Phase 2/7] Done."
 echo ""
 echo "[Phase 3/7] Fixing pip and installing build tools..."
 
-docker exec $DOCKER_PROXY_FLAGS -u root flink-jm bash -c "
+docker exec $DOCKER_PROXY_FLAGS -u root $BUILD_CONTAINER bash -c "
 set -e
 export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PYENV_ROOT/versions/$PYTHON_VERSION/bin:\$PATH
@@ -183,7 +190,7 @@ echo ""
 echo "[Phase 4/7] Installing Python dependencies..."
 echo "  Order matters: numpy first (beam Cythonize needs it), then beam, then flink"
 
-docker exec $DOCKER_PROXY_FLAGS -u root flink-jm bash -c "
+docker exec $DOCKER_PROXY_FLAGS -u root $BUILD_CONTAINER bash -c "
 set -e
 export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PYENV_ROOT/versions/$PYTHON_VERSION/bin:\$PATH
@@ -302,7 +309,7 @@ fi
 # Extract major.minor from PYTHON_VERSION for .so names
 PY_MM="${PYTHON_VERSION%.*}"
 
-docker exec $DOCKER_PROXY_FLAGS -u root flink-jm bash -c "
+docker exec $DOCKER_PROXY_FLAGS -u root $BUILD_CONTAINER bash -c "
 set -e
 export PATH=$PYENV_ROOT/versions/$PYTHON_VERSION/bin:\$PATH
 
@@ -337,22 +344,31 @@ echo '  Cleaned up build artifacts'
 "
 
 # Commit the image
-docker commit flink-jm "$IMAGE_NAME"
+docker commit $BUILD_CONTAINER "$IMAGE_NAME"
 echo "  Committed image: $IMAGE_NAME"
 
 echo "[Phase 5/7] Done."
 
 # ---------------------------------------------------------------------------
-# Phase 6: Start TaskManagers
+# Phase 6: Start Flink cluster from committed image
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 6/7] Starting TaskManagers..."
+echo "[Phase 6/7] Starting Flink cluster..."
 
 TMPFS_FLAG=""
 if [ "$USE_TMPFS" = "true" ]; then
     TMPFS_FLAG="--tmpfs /tmp:rw,exec"
 fi
 
+# Start JobManager
+docker rm -f flink-jm 2>/dev/null || true
+docker run -d --name flink-jm --hostname flink-jm --network "$NETWORK" \
+    -e FLINK_PROPERTIES='jobmanager.rpc.address: flink-jm' \
+    -p 8081:8081 \
+    "$IMAGE_NAME" jobmanager
+echo "  Started flink-jm"
+
+# Start TaskManagers
 for i in $(seq 1 "$TM_COUNT"); do
     docker rm -f "flink-tm$i" 2>/dev/null || true
     docker run -d --name "flink-tm$i" --network "$NETWORK" \
@@ -374,13 +390,13 @@ sleep 15
 echo ""
 echo "[Phase 7/7] Verifying cluster health..."
 
-docker exec $DOCKER_PROXY_FLAGS flink-jm bash -c " | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d.get(\"taskmanagers\",[])))')
-echo \"  TaskManagers registered: \$TM_COUNT\"
-if [ \"\$TM_COUNT\" -lt 2 ]; then
-    echo '  WARNING: Less than 2 TMs registered!'
+TM_COUNT_ACTUAL=$(docker exec flink-jm curl -sf http://localhost:8081/taskmanagers | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d.get("taskmanagers",[])))')
+echo "  TaskManagers registered: $TM_COUNT_ACTUAL"
+if [ "$TM_COUNT_ACTUAL" -lt "$TM_COUNT" ]; then
+    echo "  WARNING: Only $TM_COUNT_ACTUAL/$TM_COUNT TMs registered!"
 fi
-curl -sf http://localhost:8081/overview | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f\"  Slots: {d[\"slots-number\"]}, TMs: {d[\"taskmanagers\"]}\")'
-"
+
+curl -sf http://localhost:8081/overview | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f"  Slots: {d[\"slots-number\"]}, TMs: {d[\"taskmanagers\"]}")'
 
 # Install perf inside containers
 echo "  Installing profiling tools..."
