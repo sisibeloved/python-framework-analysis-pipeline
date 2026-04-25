@@ -244,7 +244,21 @@ def _execute_step(
                 encoding="utf-8",
             )
         if result.get("status") == "failed":
-            raise StepError(f"environment deploy failed: {result.get('failed', 0)} steps failed")
+            fs = result.get("failedStep", {})
+            cmd = fs.get("command", "")
+            stderr = fs.get("stderr", "")
+            desc = fs.get("description", "")
+            exit_code = fs.get("exitCode", "")
+            parts = [f"environment deploy failed: {result.get('failed', 0)} step(s) failed"]
+            if desc:
+                parts.append(f"  Step: {fs.get('id', '')} — {desc}")
+            if cmd:
+                parts.append(f"  Command: {cmd}")
+            if exit_code:
+                parts.append(f"  Exit code: {exit_code}")
+            if stderr:
+                parts.append(f"  stderr: {stderr[:500]}")
+            raise StepError("\n".join(parts))
 
     elif step_id == "4":
         _run_workload_deploy(project_path, run_dir, platform, yes=yes)
@@ -293,7 +307,7 @@ def _run_workload_deploy(
     logger.info("Uploading %s to %s:%s", local_dir, host_ref, remote_dir)
     ok = executor.push_dir(local_dir, remote_dir)
     if not ok:
-        raise StepError(f"Failed to upload workload to {host_ref}")
+        raise StepError(f"Failed to upload workload to {host_ref}:\n  Local: {local_dir}\n  Remote: {remote_dir}")
 
     # If container build mode, compile JAR inside container.
     if workload.get("build") == "container":
@@ -376,7 +390,11 @@ def _run_benchmark(
             timeout=300,
         )
         if result.returncode != 0:
-            raise StepError(f"Benchmark {query} failed: {result.stderr[:200]}")
+            raise StepError(
+                f"Benchmark {query} failed (exit {result.returncode}):\n"
+                f"  Command: docker exec flink-jm python3 benchmark_runner.py --query {query} --rows {rows}\n"
+                f"  stderr: {result.stderr[:500]}"
+            )
 
         # Parse BENCHMARK_RESULT from stdout.
         wc = _parse_benchmark_result(result.stdout, query)
@@ -488,7 +506,10 @@ def _ensure_container_perf(
         timeout=30,
     )
     if check.returncode != 0 or not check.stdout.strip():
-        raise StepError("Could not install perf inside TM container")
+        raise StepError(
+            f"Could not install perf inside TM container (exit {check.returncode}):\n"
+            f"  stderr: {check.stderr[:500]}"
+        )
     return check.stdout.strip()
 
 

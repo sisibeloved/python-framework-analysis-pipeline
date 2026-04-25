@@ -116,15 +116,33 @@ def deploy_plan(
             break
 
         if result.returncode != 0:
+            stderr_snippet = result.stderr[:500] if result.stderr else ""
             logger.error("[Step %s] Failed (exit %d)", step_id, result.returncode)
             record_steps.append({
                 "id": step_id,
                 "status": "failed",
                 "exitCode": result.returncode,
-                "note": result.stderr[:500] if result.stderr else "",
+                "command": command,
+                "description": description,
+                "note": stderr_snippet,
             })
             failed += 1
-            break
+            # Abort: attach details so caller can surface them.
+            return {
+                "status": "failed",
+                "platform": platform_id,
+                "passed": passed,
+                "failed": failed,
+                "skipped": skipped,
+                "failedStep": {
+                    "id": step_id,
+                    "description": description,
+                    "command": command,
+                    "exitCode": result.returncode,
+                    "stderr": stderr_snippet,
+                },
+                "record": record,
+            }
         else:
             logger.info("[Step %s] Passed", step_id)
             record_steps.append({"id": step_id, "status": "passed", "exitCode": 0})

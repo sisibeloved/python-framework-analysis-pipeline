@@ -20,8 +20,8 @@ cp projects/pyflink-tpch-reference/environment.yaml.example \
    projects/pyflink-tpch-reference/environment.yaml
 
 # 2. 编辑 environment.yaml，将占位符替换为实际主机
-#    - hostRef / alias: 替换为 ~/.ssh/config 中的 Host 别名
-#    - 可选填写 user / key / port，不填则使用 SSH config 默认值
+#    - alias: 填 IP 地址（如 192.168.1.100）或 ~/.ssh/config 中的 Host 别名
+#    - user / key / port: 可选，不填则使用 SSH config 默认值
 ```
 
 `environment.yaml` 被 `.gitignore` 排除，不会提交到仓库。

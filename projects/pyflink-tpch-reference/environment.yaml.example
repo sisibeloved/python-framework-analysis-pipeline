@@ -6,8 +6,11 @@ mode: plan-only
 # client/jm/tm 角色在同一台机器上用 Docker network 通信
 # 宿主机只需要 Docker，Java/Python/Flink 全部在容器内
 #
-# 使用方式：复制为 environment.yaml，将 hostRef / alias 替换为实际 SSH 主机名
+# 使用方式：复制为 environment.yaml，将 hostRef / alias 替换为实际主机
 #   cp environment.yaml.example environment.yaml
+#
+# alias 可以填 IP 地址（如 192.168.1.100）或 ~/.ssh/config 中的 Host 别名
+# 同时可通过 user / key / port 指定连接参数，不填则使用 SSH config 默认值
 
 platforms:
   - id: arm
@@ -51,10 +54,10 @@ software:
 hostRefs:
   arm-host:
     connect: ssh
-    alias: YOUR_ARM_HOST     # SSH config 中的 Host 别名
-    # user: root             # 可选，默认使用 SSH config
-    # key: ~/.ssh/id_rsa     # 可选，默认使用 SSH config
-    # port: 22               # 可选，默认 22
+    alias: 192.168.1.100      # IP 地址或 SSH config 中的 Host 别名
+    user: root                # 可选，不填则使用 SSH config 默认值
+    key: ~/.ssh/id_rsa        # 可选，不填则使用 SSH config 默认值
+    port: 22                  # 可选，默认 22
     capabilities:
       ssh: true
       sudo: true
@@ -65,7 +68,7 @@ hostRefs:
 
   x86-host:
     connect: ssh
-    alias: YOUR_X86_HOST     # SSH config 中的 Host 别名
+    alias: 192.168.1.200      # IP 地址或 SSH config 中的 Host 别名
     capabilities:
       ssh: true
       sudo: true

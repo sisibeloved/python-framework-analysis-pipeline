@@ -178,7 +178,7 @@ class EnvironmentPlanTest(unittest.TestCase):
         step_ids = [s["id"] for s in plan["steps"]]
 
         # Single-machine mode: only one set of host probes
-        self.assertIn("probe-os-kunpeng", step_ids)
+        self.assertIn("probe-os-arm-host", step_ids)
         self.assertNotIn("probe-os-jobmanager", step_ids)
 
     def test_plan_writes_to_output_dir(self) -> None:
@@ -346,7 +346,7 @@ class YamlParserTest(unittest.TestCase):
         self.assertEqual(len(env["platforms"][0]["hosts"]), 3)
         self.assertEqual(env["software"]["flinkImage"], "flink:2.2.0-java17")
         self.assertTrue(env["software"]["dockerRequired"])
-        self.assertIn("kunpeng", env["hostRefs"])
+        self.assertIn("arm-host", env["hostRefs"])
 
     def test_parses_capabilities(self) -> None:
         from pyframework_pipeline.environment.parser import load_environment_yaml
@@ -355,7 +355,7 @@ class YamlParserTest(unittest.TestCase):
             REPO_ROOT / "projects" / "pyflink-tpch-reference" / "environment.yaml"
         )
 
-        caps = env["hostRefs"]["kunpeng"]["capabilities"]
+        caps = env["hostRefs"]["arm-host"]["capabilities"]
         self.assertTrue(caps["ssh"])
         self.assertTrue(caps["sudo"])
         self.assertTrue(caps["docker"])
