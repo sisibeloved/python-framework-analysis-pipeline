@@ -160,7 +160,7 @@ def deploy_plan(
 
         # Execute.
         try:
-            result = executor.run(command, timeout=step_timeout)
+            result = executor.run(command, timeout=step_timeout, stream=bool(script_path))
         except Exception as exc:
             logger.error("[Step %s] SSH error: %s", step_id, exc)
             record_steps.append({

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -52,16 +53,50 @@ class SshExecutor:
         args.append(f"bash -lc {subprocess.list2cmdline([command])}")
         return args
 
-    def run(self, command: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-        """Execute a command on the remote host."""
+    def run(self, command: str, timeout: int = 300, stream: bool = False) -> subprocess.CompletedProcess[str]:
+        """Execute a command on the remote host.
+
+        Parameters
+        ----------
+        stream : bool
+            If True, stream stdout to the local terminal in real-time
+            instead of capturing it. Useful for long-running build steps.
+        """
         args = self._build_ssh_args(command)
         log.info("SSH: %s", command)
+        if stream:
+            return self._run_streaming(args, timeout)
         return subprocess.run(
             args,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+        )
+
+    def _run_streaming(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+        """Execute command with real-time output streamed to the terminal."""
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        stdout_lines: list[str] = []
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                print(f"  {line}", flush=True)
+                stdout_lines.append(line)
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout_lines.append(f"[TIMEOUT after {timeout}s]")
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=proc.returncode,
+            stdout="\n".join(stdout_lines),
+            stderr="",
         )
 
     def fetch_file(self, remote_path: str, local_path: Path) -> bool:
