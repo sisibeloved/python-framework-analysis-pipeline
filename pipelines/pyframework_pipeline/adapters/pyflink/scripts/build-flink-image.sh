@@ -29,7 +29,7 @@ TM_COUNT="${TM_COUNT:-2}"
 USE_TMPFS="${USE_TMPFS:-true}"
 MAKEOPTS="${MAKEOPTS:--j$(($(nproc 2>/dev/null || echo 4) / 2))}"
 PYENV_ROOT="/root/.pyenv"
-PIP="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/pip"
+PIP="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/pip --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org"
 PYTHON="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/python3"
 
 # Forward proxy env vars into docker exec calls (container doesn't inherit host env)
@@ -75,6 +75,13 @@ apt-get update -qq && apt-get install -y \
     liblzma-dev git curl \
     openjdk-17-jdk-headless || exit 1
 echo '  System deps installed'
+
+# Disable SSL verification for all network tools (proxy intercepts HTTPS)
+git config --global http.sslVerify false
+echo 'insecure' >> ~/.curlrc
+echo 'check_certificate = off' >> ~/.wgetrc
+echo 'Acquire::https::Verify-Peer \"false\";' > /etc/apt/apt.conf.d/99no-ssl-verify
+echo '  SSL verification disabled for git/curl/wget/apt'
 
 # Install pyenv
 curl -sSL https://pyenv.run | bash
