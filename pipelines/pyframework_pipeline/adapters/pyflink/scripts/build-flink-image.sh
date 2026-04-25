@@ -42,7 +42,7 @@ echo "  TM_COUNT=$TM_COUNT"
 # Phase 1: Start base container
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 1] Starting base container..."
+echo "[Phase 1/7] Starting base container..."
 docker network create "$NETWORK" 2>/dev/null || true
 docker rm -f flink-jm 2>/dev/null || true
 docker run -d --name flink-jm --hostname flink-jm --network "$NETWORK" -p 8081:8081 \
@@ -53,14 +53,14 @@ sleep 3
 # Phase 2: Install system deps + compile Python
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 2] Installing build deps and compiling Python $PYTHON_VERSION..."
+echo "[Phase 2/7] Installing build deps and compiling Python $PYTHON_VERSION..."
 echo "  (This takes ~40 min with LTO+PGO on 4 cores)"
 
 docker exec -u root flink-jm bash -c "
 set -e
 
 # System build deps
-apt-get update -qq && apt-get install -y -qq \
+apt-get update -qq && apt-get install -y \
     build-essential libssl-dev zlib1g-dev libbz2-dev \
     libreadline-dev libsqlite3-dev libffi-dev \
     liblzma-dev git curl \
@@ -68,28 +68,29 @@ apt-get update -qq && apt-get install -y -qq \
 echo '  System deps installed'
 
 # Install pyenv
-curl -sSL https://pyenv.run | bash 2>&1 | tail -1
+curl -sSL https://pyenv.run | bash
 export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PATH
 eval \"\$(pyenv init -)\"
 
 # Compile Python with LTO+PGO
+echo '  Compiling Python (this takes ~40 min)...'
 CFLAGS='-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer' \
 PYTHON_CONFIGURE_OPTS='--enable-optimizations --with-lto' \
 MAKEOPTS='$MAKEOPTS' \
-pyenv install $PYTHON_VERSION 2>&1 | tail -3
+pyenv install $PYTHON_VERSION
 
 pyenv global $PYTHON_VERSION
 echo '  Python compiled:' \$(python3 --version)
 "
 
-echo "[Phase 2] Done."
+echo "[Phase 2/7] Done."
 
 # ---------------------------------------------------------------------------
 # Phase 3: Fix pip truststore + install build tools
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 3] Fixing pip and installing build tools..."
+echo "[Phase 3/7] Fixing pip and installing build tools..."
 
 docker exec -u root flink-jm bash -c "
 set -e
@@ -129,17 +130,17 @@ print('  Fixed certifi cacert.pem')
 PYEOF
 
 # Build tools
-$PIP install 'Cython>=3.2' setuptools==78.1.0 meson-python ninja meson 2>&1 | tail -1
+$PIP install 'Cython>=3.2' setuptools==78.1.0 meson-python ninja meson
 echo '  Build tools installed'
 "
 
-echo "[Phase 3] Done."
+echo "[Phase 3/7] Done."
 
 # ---------------------------------------------------------------------------
 # Phase 4: Install Python dependencies in correct order
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 4] Installing Python dependencies..."
+echo "[Phase 4/7] Installing Python dependencies..."
 echo "  Order matters: numpy first (beam Cythonize needs it), then beam, then flink"
 
 docker exec -u root flink-jm bash -c "
@@ -148,20 +149,20 @@ export PYENV_ROOT=$PYENV_ROOT
 export PATH=\$PYENV_ROOT/bin:\$PYENV_ROOT/versions/$PYTHON_VERSION/bin:\$PATH
 
 # 1. numpy (beam's Cythonize requires it at build time)
-echo '  Installing numpy...'
-$PIP install numpy 2>&1 | tail -1
+echo '  [4a] Installing numpy...'
+$PIP install numpy
 
 # 2. apache-beam from source (Cython 3.2.4 generates 3.14-compatible C)
-echo '  Installing apache-beam 2.61.0 (from source, ~5 min)...'
-$PIP install apache-beam==2.61.0 --no-build-isolation --no-deps 2>&1 | tail -1
+echo '  [4b] Installing apache-beam 2.61.0 (from source, ~5 min)...'
+$PIP install apache-beam==2.61.0 --no-build-isolation --no-deps
 
 # 3. apache-flink from source
-echo '  Installing apache-flink 2.2.0 (from source)...'
-$PIP install py4j==0.10.9.7 2>&1 | tail -1
-$PIP install apache-flink==2.2.0 apache-flink-libraries==2.2.0 --no-build-isolation --no-deps 2>&1 | tail -1
+echo '  [4c] Installing apache-flink 2.2.0 (from source)...'
+$PIP install py4j==0.10.9.7
+$PIP install apache-flink==2.2.0 apache-flink-libraries==2.2.0 --no-build-isolation --no-deps
 
 # 4. Runtime deps (versions verified on kunpeng ARM)
-echo '  Installing runtime dependencies...'
+echo '  [4d] Installing runtime dependencies...'
 $PIP install \
     dill==0.4.1 \
     sortedcontainers==2.4.0 \
@@ -190,29 +191,28 @@ $PIP install \
     grpcio==1.80.0 \
     grpcio-tools==1.80.0 \
     ruamel.yaml==0.19.1 \
-    pandas \
-    2>&1 | tail -1
+    pandas
 
 # 5. pyarrow 23 (Python 3.14 requires >=23, source build against system Arrow C++)
-echo '  Installing Apache Arrow C++ dev packages...'
-apt-get install -y -qq lsb-release wget 2>&1 | tail -1
+echo '  [4e] Installing Apache Arrow C++ dev packages...'
+apt-get install -y lsb-release wget
 wget -q https://apache.jfrog.io/artifactory/arrow/\$(lsb_release --id --short | tr A-Z a-z)/apache-arrow-apt-source-latest-\$(lsb_release --codename --short).deb -O /tmp/arrow-apt.deb
-dpkg -i /tmp/arrow-apt.deb 2>&1 | tail -1
+dpkg -i /tmp/arrow-apt.deb
 apt-get update -qq
-apt-get install -y -qq libarrow-dev libparquet-dev libarrow-dataset-dev libarrow-acero-dev 2>&1 | tail -1
+apt-get install -y libarrow-dev libparquet-dev libarrow-dataset-dev libarrow-acero-dev
 echo '  Arrow C++ dev packages installed'
 
 # Install cmake (required for pyarrow source build)
-$PIP install cmake ninja 2>&1 | tail -1
+$PIP install cmake ninja
 
 # Download pyarrow source manually (pip install fails due to dynamic version 0.0.0)
-echo '  Downloading pyarrow 23.0.1 source...'
+echo '  [4f] Downloading pyarrow 23.0.1 source...'
 cd /tmp && mkdir -p pyarrow-build && cd pyarrow-build
 curl -sSL https://files.pythonhosted.org/packages/88/22/134986a4cc224d593c1afde5494d18ff629393d74cc2eddb176669f234a4/pyarrow-23.0.1.tar.gz -o pyarrow-23.0.1.tar.gz
 tar xzf pyarrow-23.0.1.tar.gz
 cd pyarrow-23.0.1
 
-echo '  Building pyarrow 23.0.1 (~15 min, C++ compilation)...'
+echo '  [4f] Building pyarrow 23.0.1 (~15 min, C++ compilation)...'
 PYARROW_WITH_CUDA=0 \
 PYARROW_WITH_FLIGHT=0 \
 PYARROW_WITH_GANDIVA=0 \
@@ -225,19 +225,19 @@ PYARROW_WITH_HDFS=0 \
 PYARROW_WITH_PARQUET=1 \
 PYARROW_WITH_DATASET=1 \
 PYARROW_WITH_ACERO=1 \
-$PIP install . --no-build-isolation 2>&1 | tail -5
+$PIP install . --no-build-isolation
 echo '  pyarrow installed'
 
 echo '  All Python deps installed.'
 "
 
-echo "[Phase 4] Done."
+echo "[Phase 4/7] Done."
 
 # ---------------------------------------------------------------------------
 # Phase 5: Verify + copy flink-python.jar + commit
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 5] Verifying and committing image..."
+echo "[Phase 5/7] Verifying and committing image..."
 
 # Determine libpython path based on architecture
 if [ "$ARCH" = "aarch64" ]; then
@@ -278,7 +278,7 @@ echo '  Fixed flink user Python access'
 
 # Clean up build artifacts
 rm -rf /tmp/pip-* /tmp/python-build.* /tmp/*.whl /tmp/pyarrow-src /tmp/fix_pip*.py /tmp/verify*.py /tmp/pyarrow-build /tmp/arrow-apt.deb
-$PYENV_ROOT/versions/$PYTHON_VERSION/bin/pip cache purge 2>&1 | tail -1
+$PYENV_ROOT/versions/$PYTHON_VERSION/bin/pip cache purge
 echo '  Cleaned up build artifacts'
 "
 
@@ -286,13 +286,13 @@ echo '  Cleaned up build artifacts'
 docker commit flink-jm "$IMAGE_NAME"
 echo "  Committed image: $IMAGE_NAME"
 
-echo "[Phase 5] Done."
+echo "[Phase 5/7] Done."
 
 # ---------------------------------------------------------------------------
 # Phase 6: Start TaskManagers
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 6] Starting TaskManagers..."
+echo "[Phase 6/7] Starting TaskManagers..."
 
 TMPFS_FLAG=""
 if [ "$USE_TMPFS" = "true" ]; then
@@ -318,7 +318,7 @@ sleep 15
 # Phase 7: Verify cluster health
 # ---------------------------------------------------------------------------
 echo ""
-echo "[Phase 7] Verifying cluster health..."
+echo "[Phase 7/7] Verifying cluster health..."
 
 docker exec flink-jm bash -c "
 set -e
@@ -333,7 +333,7 @@ curl -sf http://localhost:8081/overview | python3 -c 'import sys,json; d=json.lo
 # Install perf inside containers
 echo "  Installing profiling tools..."
 for c in flink-jm $(for i in $(seq 1 "$TM_COUNT"); do echo "flink-tm$i"; done); do
-    docker exec -u root "$c" bash -c 'apt-get update -qq && apt-get install -y -qq linux-tools-common linux-tools-generic 2>&1 | tail -1' || true
+    docker exec -u root "$c" bash -c 'apt-get update -qq && apt-get install -y linux-tools-common linux-tools-generic' || true
 done
 
 echo ""
