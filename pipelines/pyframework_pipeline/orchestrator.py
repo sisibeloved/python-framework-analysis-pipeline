@@ -192,7 +192,7 @@ def run_pipeline(
                     state.mark_completed(step_id, plat)
                 except StepError as exc:
                     state.mark_failed(step_id, plat, str(exc))
-                    _print_resume_hint(step_id, plat, project_path)
+                    _print_resume_hint(step_id, plat, project_path, error=str(exc))
                     return 1
 
         elif step_id in GLOBAL_STEPS:
@@ -210,7 +210,7 @@ def run_pipeline(
                 state.mark_completed(step_id)
             except StepError as exc:
                 state.mark_failed(step_id, error=str(exc))
-                _print_resume_hint(step_id, None, project_path)
+                _print_resume_hint(step_id, None, project_path, error=str(exc))
                 return 1
 
     logger.info("Pipeline completed successfully")
@@ -1062,6 +1062,7 @@ from .config import load_project_config, get_run_config
 
 def _print_resume_hint(
     step_id: str, platform: str | None, project_path: Path,
+    error: str = "",
 ) -> None:
     plat_str = f' on platform "{platform}"' if platform else ""
     step_name = next((d["name"] for d in STEP_DEFS if d["step"] == step_id), step_id)
@@ -1069,6 +1070,8 @@ def _print_resume_hint(
         f"\nERROR: Step {step_id} \"{step_name}\" failed{plat_str}",
         file=sys.stderr,
     )
+    if error:
+        print(error, file=sys.stderr)
     print(
         f"\nResume from this step:\n"
         f"  pyframework-pipeline run {project_path} --resume-from {step_id}",
