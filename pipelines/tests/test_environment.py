@@ -84,7 +84,7 @@ class EnvironmentPlanTest(unittest.TestCase):
         self.assertIn("build-flink-image", step_ids)
         build_step = next(s for s in plan["steps"] if s["id"] == "build-flink-image")
         self.assertEqual(build_step["kind"], "build")
-        self.assertEqual(build_step["scriptPath"], "scripts/build-flink-image.sh")
+        self.assertEqual(build_step["scriptPath"], "adapters/pyflink/scripts/build-flink-image.sh")
         self.assertEqual(build_step["timeout"], 6000)
         self.assertIn("bash /tmp/build-flink-image.sh aarch64", build_step["command"])
         self.assertTrue(build_step["mutatesHost"])
@@ -118,7 +118,10 @@ class EnvironmentPlanTest(unittest.TestCase):
         build_step = next(s for s in plan["steps"] if s["id"] == "build-flink-image")
 
         self.assertIn("docker image inspect", build_step["command"])
-        self.assertIn("|| bash /tmp/build-flink-image.sh", build_step["command"])
+        self.assertIn("bash /tmp/build-flink-image.sh", build_step["command"])
+        self.assertIn("IMAGE_NAME=", build_step["command"])
+        self.assertIn("BASE_IMAGE=", build_step["command"])
+        self.assertIn("PYTHON_VERSION=", build_step["command"])
 
     def test_plan_recreates_existing_container_when_image_differs(self) -> None:
         result = CliInvoker.run(

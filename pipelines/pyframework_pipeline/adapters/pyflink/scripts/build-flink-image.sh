@@ -1,36 +1,42 @@
 #!/usr/bin/env bash
-# build-flink-image.sh — Build Flink + Python 3.14.3 + PyFlink Docker image
+# build-flink-image.sh — Build Flink + Python + PyFlink Docker image
 #
 # Usage: ./build-flink-image.sh [ARCH]
 #   ARCH = x86_64 (default) or aarch64
 #
+# All configurable values are passed via environment variables.
+# The pipeline sets these from environment.yaml; standalone use falls back to defaults.
+#
 # Prerequisites: Docker installed, this script runs ON the target host.
 #
 # Expected total time: ~80 min (Python compile ~40 min, pip deps ~15 min, pyarrow C++ ~20 min)
-#
-# Based on: docs/runbooks/pyflink-python314-deployment.md
-#           memory/pyflink-deployment-findings.md
 
 set -euo pipefail
 
 ARCH="${1:-x86_64}"
 if [ "$ARCH" = "aarch64" ]; then
     ARCH_TAG="arm"
-    MAKEOPTS="-j2"
 else
     ARCH_TAG="x86"
-    MAKEOPTS="-j2"
 fi
 
-IMAGE_NAME="flink-pyflink:2.2.0-py314-${ARCH_TAG}-final"
-BASE_IMAGE="flink:2.2.0-java17"
-NETWORK="flink-network"
-PYTHON_VERSION="3.14.3"
+# Configurable via environment variables (pipeline passes these from config)
+BASE_IMAGE="${BASE_IMAGE:-flink:2.2.0-java17}"
+IMAGE_NAME="${IMAGE_NAME:-flink-pyflink:2.2.0-py314-${ARCH_TAG}-final}"
+NETWORK="${NETWORK:-flink-network}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14.3}"
+TM_COUNT="${TM_COUNT:-2}"
+USE_TMPFS="${USE_TMPFS:-true}"
+MAKEOPTS="${MAKEOPTS:--j2}"
 PYENV_ROOT="/root/.pyenv"
 PIP="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/pip"
 PYTHON="$PYENV_ROOT/versions/$PYTHON_VERSION/bin/python3"
 
 echo "=== Building $IMAGE_NAME on $ARCH ==="
+echo "  BASE_IMAGE=$BASE_IMAGE"
+echo "  NETWORK=$NETWORK"
+echo "  PYTHON_VERSION=$PYTHON_VERSION"
+echo "  TM_COUNT=$TM_COUNT"
 
 # ---------------------------------------------------------------------------
 # Phase 1: Start base container
@@ -233,6 +239,15 @@ echo "[Phase 4] Done."
 echo ""
 echo "[Phase 5] Verifying and committing image..."
 
+# Determine libpython path based on architecture
+if [ "$ARCH" = "aarch64" ]; then
+    LIB_DIR="/usr/lib/aarch64-linux-gnu"
+else
+    LIB_DIR="/usr/lib/x86_64-linux-gnu"
+fi
+# Extract major.minor from PYTHON_VERSION for .so names
+PY_MM="${PYTHON_VERSION%.*}"
+
 docker exec -u root flink-jm bash -c "
 set -e
 export PATH=$PYENV_ROOT/versions/$PYTHON_VERSION/bin:\$PATH
@@ -253,10 +268,10 @@ javac -version 2>&1 | head -1
 # Fix flink user (uid 9999) access to Python
 chmod o+x /root
 chmod -R o+rX /root/.pyenv
-rm -f /usr/lib/x86_64-linux-gnu/libpython3.14.so* /usr/lib/x86_64-linux-gnu/libpython3.so
-cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython3.14.so.1.0 /usr/lib/x86_64-linux-gnu/
-cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython3.14.so /usr/lib/x86_64-linux-gnu/
-cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython3.so /usr/lib/x86_64-linux-gnu/
+rm -f $LIB_DIR/libpython${PY_MM}.so* $LIB_DIR/libpython3.so
+cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython${PY_MM}.so.1.0 $LIB_DIR/
+cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython${PY_MM}.so $LIB_DIR/
+cp /root/.pyenv/versions/$PYTHON_VERSION/lib/libpython3.so $LIB_DIR/
 ln -sf /root/.pyenv/versions/$PYTHON_VERSION/bin/python3 /usr/local/bin/python3
 ldconfig
 echo '  Fixed flink user Python access'
@@ -279,11 +294,16 @@ echo "[Phase 5] Done."
 echo ""
 echo "[Phase 6] Starting TaskManagers..."
 
-for i in 1 2; do
+TMPFS_FLAG=""
+if [ "$USE_TMPFS" = "true" ]; then
+    TMPFS_FLAG="--tmpfs /tmp:rw,exec"
+fi
+
+for i in $(seq 1 "$TM_COUNT"); do
     docker rm -f "flink-tm$i" 2>/dev/null || true
     docker run -d --name "flink-tm$i" --network "$NETWORK" \
         -e FLINK_PROPERTIES='jobmanager.rpc.address: flink-jm' \
-        --tmpfs /tmp:rw,exec \
+        $TMPFS_FLAG \
         --privileged \
         -e PYTHONPERFSUPPORT=1 \
         "$IMAGE_NAME" taskmanager
@@ -312,13 +332,13 @@ curl -sf http://localhost:8081/overview | python3 -c 'import sys,json; d=json.lo
 
 # Install perf inside containers
 echo "  Installing profiling tools..."
-for c in flink-jm flink-tm1 flink-tm2; do
+for c in flink-jm $(for i in $(seq 1 "$TM_COUNT"); do echo "flink-tm$i"; done); do
     docker exec -u root "$c" bash -c 'apt-get update -qq && apt-get install -y -qq linux-tools-common linux-tools-generic 2>&1 | tail -1' || true
 done
 
 echo ""
 echo "=== BUILD COMPLETE ==="
 echo "Image: $IMAGE_NAME"
-echo "Cluster: flink-jm + flink-tm1 + flink-tm2"
+echo "Cluster: flink-jm + flink-tm(1..$TM_COUNT)"
 echo "Python: $PYTHON_VERSION"
 echo "Ready for benchmark."

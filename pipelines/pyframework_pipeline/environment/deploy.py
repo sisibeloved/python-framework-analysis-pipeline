@@ -87,8 +87,9 @@ def deploy_plan(
 
         # Upload local script if specified.
         if script_path:
-            repo_root = project_path.parent.parent
-            local_script = repo_root / script_path
+            import pyframework_pipeline
+            pkg_dir = Path(pyframework_pipeline.__file__).parent
+            local_script = pkg_dir / script_path
             if not local_script.exists():
                 return {
                     "status": "failed",

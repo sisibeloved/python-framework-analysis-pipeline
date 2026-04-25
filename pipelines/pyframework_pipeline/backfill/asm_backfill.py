@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 # Symbol -> {sourceFile, snippet} mapping for known CPython hotspot functions.
-_SYMBOL_MAP_PATH = Path(__file__).resolve().parents[3] / "scripts" / "symbol_source_map.json"
+_SYMBOL_MAP_PATH = Path(__file__).parent / "data" / "symbol_source_map.json"
 _symbol_source_map: dict[str, dict] | None = None
 
 

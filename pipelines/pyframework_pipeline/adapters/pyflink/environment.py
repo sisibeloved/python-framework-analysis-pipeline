@@ -63,16 +63,24 @@ class PyFlinkEnvironmentAdapter:
         host = hosts_by_role.get("jobmanager", hosts_by_role.get("client", ""))
         host_alias = host_refs.get(host, {}).get("alias", host)
         arch = platform_config.get("arch", "x86_64")
+        python_version = software.get("pythonVersion", "3.14.3")
+        use_tmpfs = software.get("taskmanagerTmpfs", False)
 
         # Step 0: Build Flink+PyFlink image (skip if already exists)
-        build_script = software.get("buildScript", "scripts/build-flink-image.sh")
+        build_script = "adapters/pyflink/scripts/build-flink-image.sh"
+        base_image = software.get("flinkImage", DEFAULT_IMAGE)
+        build_env = (
+            f"IMAGE_NAME={image} BASE_IMAGE={base_image} "
+            f"NETWORK={network} PYTHON_VERSION={python_version} "
+            f"TM_COUNT={tm_count} USE_TMPFS={'true' if use_tmpfs else 'false'}"
+        )
         steps.append(PlanStep(
             id="build-flink-image",
             kind="build",
             hostRef=host,
             command=(
                 f"docker image inspect {image} >/dev/null 2>&1 "
-                f"|| bash /tmp/build-flink-image.sh {arch}"
+                f"|| {build_env} bash /tmp/build-flink-image.sh {arch}"
             ),
             description=f"Build Flink+PyFlink image on {host_alias} (~80 min first run)",
             mutatesHost=True,
