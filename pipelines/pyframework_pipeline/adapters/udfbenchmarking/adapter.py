@@ -334,6 +334,13 @@ class UdfBenchmarkingAdapter:
                 "cd /workspace/benchmark; "
                 f"test -f {shlex.quote(config_file)}; "
                 "command -v perf >/dev/null; "
+                # Pre-generate the random video dataset OUTSIDE the perf record
+                # window. Video generation (cv2/numpy MP4 writes) is test-fixture
+                # preparation, not the UDF pipeline under measurement, so it must
+                # not pollute perf.data sampling nor the step-5a wall-clock. The
+                # generator skips videos that already exist, so on repeat runs
+                # this is a cheap no-op cache check.
+                f"python3 -m datasets.random_video --config-file {shlex.quote(config_file)} >/dev/null 2>&1 || true; "
                 "perf record -F 999 -g -e task-clock -o /tmp/perf-udf.data -- "
                 f"python3 main.py {runner_args}; "
                 "test -s /tmp/perf-udf.data; "
