@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--run-dir", help="运行输出目录")
     run_p.add_argument("--resume-from", help="从指定步骤恢复（如 5b.2b）")
     run_p.add_argument("--stop-before", help="在指定步骤前停止（如 5b.3）")
+    run_p.add_argument(
+        "--platform",
+        action="append",
+        help="仅运行指定平台；可重复传入，且必须已在 run.platforms 中配置。",
+    )
     run_p.add_argument("--force", action="store_true", help="清空状态重新跑")
     run_p.add_argument("--yes", action="store_true", help="跳过确认提示")
 
@@ -274,6 +279,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="[S7] 查看桥接状态。",
     ).add_argument("project")
 
+    # operator (independently resumable operator-level analysis)
+    operator_parser = subparsers.add_parser(
+        "operator",
+        help="逐算子计划、采集、归一化与双平台对比。",
+    )
+    operator_sub = operator_parser.add_subparsers(
+        dest="operator_command", required=True
+    )
+    operator_plan = operator_sub.add_parser("plan", help="生成逐算子执行计划。")
+    operator_plan.add_argument("project", help="project.yaml 路径")
+    operator_plan.add_argument("--platform", required=True)
+    operator_plan.add_argument("--run-dir", required=True)
+
+    operator_run = operator_sub.add_parser("run", help="执行独立逐算子采集阶段。")
+    operator_run.add_argument("project", help="project.yaml 路径")
+    operator_run.add_argument("--platform", required=True)
+    operator_run.add_argument("--run-dir", required=True)
+    operator_run.add_argument(
+        "--mode",
+        required=True,
+        choices=("context", "isolated", "profile", "all"),
+    )
+    operator_run.add_argument("--force", action="store_true")
+
+    operator_normalize = operator_sub.add_parser(
+        "normalize", help="归一化逐算子原始证据。"
+    )
+    operator_normalize.add_argument("project", help="project.yaml 路径")
+    operator_normalize.add_argument("--platform", required=True)
+    operator_normalize.add_argument("--run-dir", required=True)
+    operator_normalize.add_argument("--force", action="store_true")
+
+    operator_report = operator_sub.add_parser(
+        "report", help="生成高可读性逐算子 HTML/Markdown 报告。"
+    )
+    operator_report.add_argument("project", help="project.yaml 路径")
+    operator_report.add_argument("--platform", required=True)
+    operator_report.add_argument("--run-dir", required=True)
+    operator_report.add_argument("--force", action="store_true")
+
+    operator_compare = operator_sub.add_parser(
+        "compare", help="对比 ARM 与 x86 逐算子结果。"
+    )
+    operator_compare.add_argument("project", help="project.yaml 路径")
+    operator_compare.add_argument("--arm-run-dir", required=True, type=Path)
+    operator_compare.add_argument("--x86-run-dir", required=True, type=Path)
+    operator_compare.add_argument("--output-dir", required=True, type=Path)
+
     # --- compare (Step 6b) ---
     compare_parser = subparsers.add_parser(
         "compare",
@@ -300,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         compare as _compare,
         config as _config,
         environment as _environment,
+        operator as _operator,
         run as _run,
         validate as _validate,
         workload as _workload,
@@ -330,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         return _bridge.handle(args)
     if args.command == "compare":
         return _compare.cmd_compare(args)
+    if args.command == "operator":
+        return _operator.handle(args)
 
     parser.print_help(sys.stderr)
     return 2

@@ -100,3 +100,61 @@ class FrameworkAdapter(Protocol):
         platform: str,
     ) -> DisassemblySpec:
         """Return where to collect disassembly for this framework."""
+
+
+@runtime_checkable
+class OperatorAnalysisAdapter(Protocol):
+    """Optional, independently resumable operator-analysis strategy points."""
+
+    def operator_capabilities(self) -> Any:
+        """Describe which operator evidence scopes the adapter supports."""
+
+    def plan_operator_cases(
+        self,
+        project_path: Path,
+        run_dir: Path,
+        platform: str,
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Build the immutable operator case plan without running cases."""
+
+    def collect_context_timing(
+        self,
+        project_path: Path,
+        run_dir: Path,
+        platform: str,
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Collect operator timing in the original pipeline context."""
+
+    def collect_operator_timing(
+        self,
+        project_path: Path,
+        run_dir: Path,
+        platform: str,
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Collect isolated per-operator end-to-end timing."""
+
+    def collect_operator_profiles(
+        self,
+        project_path: Path,
+        run_dir: Path,
+        platform: str,
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Collect per-operator perf, flamegraph, and assembly evidence."""
+
+    def normalize_operator_artifacts(
+        self,
+        project_path: Path,
+        run_dir: Path,
+        platform: str,
+        *,
+        force: bool = False,
+    ) -> Path:
+        """Normalize adapter-owned raw operator evidence."""

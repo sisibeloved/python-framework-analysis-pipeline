@@ -3,6 +3,7 @@
 from .adapter import (
     DisassemblySpec,
     FrameworkAdapter,
+    OperatorAnalysisAdapter,
     PerfAttachSpec,
     WorkloadHandle,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "CategoryRow",
     "DisassemblySpec",
     "FrameworkAdapter",
+    "OperatorAnalysisAdapter",
     "InstructionDataset",
     "InstructionSample",
     "PerfAttachSpec",
