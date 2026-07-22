@@ -244,6 +244,143 @@
           "type": "string",
           "description": "UDF_Benchmarking benchmark container name."
         },
+        "volcOperatorSimRepo": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "description": "Pinned Volc Operator Sim Git repository URL."
+        },
+        "volcOperatorSimBaseImage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Native-architecture base image used for the Volc benchmark image."
+        },
+        "volcDebianMirrorHost": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+$",
+          "description": "Optional Debian mirror hostname used during image build."
+        },
+        "volcMiniforgeUrlTemplate": {
+          "type": "string",
+          "pattern": "^https?://.*__ARCH__.*$",
+          "description": "Pinned Miniforge installer URL template; __ARCH__ expands to aarch64 or x86_64."
+        },
+        "volcMiniforgeSha256s": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "description": "Platform-specific SHA-256 values for the configured Miniforge installer."
+        },
+        "volcPytorchCpuIndexUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://",
+          "description": "Trusted PyTorch CPU wheel index injected into upstream pip installs."
+        },
+        "volcOperatorSimRevision": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{40}$",
+          "description": "Full immutable Volc Operator Sim commit SHA."
+        },
+        "volcOperatorSimImage": {
+          "type": "string",
+          "description": "Fallback Volc Operator Sim Docker image."
+        },
+        "volcOperatorSimImages": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Platform-specific Volc Operator Sim Docker images."
+        },
+        "volcOperatorSimContainer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Volc Operator Sim benchmark container name."
+        },
+        "hostDataRoot": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute Host-persistent dataset, fixture, cache, and result root."
+        },
+        "dataSourceManifest": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Project-relative Host pre-download manifest."
+        },
+        "daftCondaEnv": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Conda environment used by the Daft/Ray engine."
+        },
+        "dataJuicerCondaEnv": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Conda environment used by the Data-Juicer native engine."
+        },
+        "shmSize": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker shared-memory size for the benchmark container."
+        },
+        "volcCpuSets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
+          },
+          "description": "Platform-specific Docker CPU affinity sets for comparable Volc runs."
+        },
+        "volcObserverCpuSets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
+          },
+          "description": "Platform-specific out-of-band CPU reserved for the Volc perf mapping observer."
+        },
+        "volcMemoryNodes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
+          },
+          "description": "Platform-specific Docker NUMA memory-node sets paired with volcCpuSets."
+        },
+        "volcVirtualization": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "Measured platform virtualization values recorded by the upstream perf lock."
+        },
+        "volcNofileSoft": {
+          "type": "integer",
+          "minimum": 4096,
+          "description": "Container soft RLIMIT_NOFILE; must satisfy the attribution profile."
+        },
+        "volcNofileHard": {
+          "type": "integer",
+          "minimum": 4096,
+          "description": "Container hard RLIMIT_NOFILE."
+        },
+        "perfFrequency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "perf record sampling frequency in Hz."
+        },
+        "perfEvents": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Comma-separated perf stat event set for operator timing passes."
+        },
+        "minHostFreeGiB": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum free Host storage required before persistent data preparation."
+        },
+        "volcPrivileged": {
+          "type": "boolean",
+          "description": "Explicit audited fallback to privileged mode for Volc perf collection."
+        },
         "benchmarkName": {
           "type": "string",
           "description": "Benchmark case name to run and collect."

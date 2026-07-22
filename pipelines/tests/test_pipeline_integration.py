@@ -18,6 +18,152 @@ from pyframework_pipeline.orchestrator import run_pipeline
 
 
 class PipelineIntegrationTest(unittest.TestCase):
+    def test_selective_resume_preserves_other_platform_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            project_yaml = _write_project(project_dir)
+            run_dir = project_dir / "runs" / "platform-resume"
+
+            with mock.patch(
+                "pyframework_pipeline.orchestrator._execute_step"
+            ):
+                first_rc = run_pipeline(
+                    project_yaml,
+                    run_dir,
+                    platforms=["arm"],
+                    resume_from="5a",
+                    stop_before="5b.1",
+                    yes=True,
+                )
+                second_rc = run_pipeline(
+                    project_yaml,
+                    run_dir,
+                    platforms=["x86"],
+                    resume_from="5a",
+                    stop_before="5b.1",
+                    yes=True,
+                )
+
+            state = json.loads((run_dir / "pipeline-run.json").read_text())
+            completed = {
+                (item["step"], item.get("platform"))
+                for item in state["steps"]
+                if item["status"] == "completed"
+            }
+
+        self.assertEqual(first_rc, 0)
+        self.assertEqual(second_rc, 0)
+        self.assertEqual(state["platforms"], ["arm", "x86"])
+        for step in ("5a", "5a.1", "5a.2"):
+            self.assertIn((step, "arm"), completed)
+            self.assertIn((step, "x86"), completed)
+
+    def test_resume_retries_stage_without_forcing_adapter_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            project_yaml = _write_project(project_dir)
+            run_dir = project_dir / "runs" / "resume"
+
+            with mock.patch(
+                "pyframework_pipeline.orchestrator._execute_step"
+            ) as execute:
+                rc = run_pipeline(
+                    project_yaml,
+                    run_dir,
+                    platforms=["arm"],
+                    resume_from="5a",
+                    stop_before="5b.1",
+                    yes=True,
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(execute.call_args_list), 3)
+            self.assertTrue(
+                all(not call.kwargs["force"] for call in execute.call_args_list)
+            )
+
+    def test_explicit_force_is_forwarded_to_adapter_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            project_yaml = _write_project(project_dir)
+            run_dir = project_dir / "runs" / "force"
+
+            with mock.patch(
+                "pyframework_pipeline.orchestrator._execute_step"
+            ) as execute:
+                rc = run_pipeline(
+                    project_yaml,
+                    run_dir,
+                    platforms=["arm"],
+                    stop_before="4",
+                    force=True,
+                    yes=True,
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(execute.call_args_list), 1)
+            self.assertTrue(execute.call_args.kwargs["force"])
+
+    def test_run_pipeline_filters_to_one_selected_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            project_yaml = _write_project(project_dir)
+            run_dir = project_dir / "runs" / "arm-only"
+
+            with mock.patch(
+                "pyframework_pipeline.orchestrator._execute_step"
+            ) as execute:
+                rc = run_pipeline(
+                    project_yaml,
+                    run_dir,
+                    platforms=["arm"],
+                    stop_before="5d",
+                    force=True,
+                    yes=True,
+                )
+
+            self.assertEqual(rc, 0)
+            state = json.loads((run_dir / "pipeline-run.json").read_text())
+            self.assertEqual(state["platforms"], ["arm"])
+            per_platform_calls = [
+                call.args[3]
+                for call in execute.call_args_list
+                if call.args[3] is not None
+            ]
+            self.assertTrue(per_platform_calls)
+            self.assertEqual(set(per_platform_calls), {"arm"})
+            global_calls = [
+                call for call in execute.call_args_list if call.args[3] is None
+            ]
+            self.assertEqual(
+                {call.args[0] for call in global_calls}, {"5c", "5c.1"}
+            )
+            self.assertTrue(
+                all(call.kwargs["platforms"] == ["arm"] for call in global_calls)
+            )
+
+    def test_run_pipeline_rejects_unconfigured_selected_platform(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "project"
+            project_dir.mkdir()
+            project_yaml = _write_project(project_dir)
+            run_dir = project_dir / "runs" / "bad-platform"
+
+            rc = run_pipeline(
+                project_yaml,
+                run_dir,
+                platforms=["riscv"],
+                stop_before="5d",
+                force=True,
+                yes=True,
+            )
+
+            self.assertEqual(rc, 1)
+
     def test_run_pipeline_backfills_dual_platform_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp) / "project"
@@ -242,6 +388,8 @@ def _fake_collect_substep(
     run_dir: Path,
     platform: str,
     substep: str,
+    *,
+    force: bool = False,
 ) -> None:
     platform_dir = run_dir / platform
     perf_dir = platform_dir / "perf" / "data"

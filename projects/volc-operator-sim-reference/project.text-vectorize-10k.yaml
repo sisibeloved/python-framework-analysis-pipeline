@@ -1,0 +1,44 @@
+id: volc-operator-sim-text-vectorize-10k
+name: Volc Operator Sim Text Vectorize 10K Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  # P0 and all attribution scopes use the same derived task overlay. The
+  # upstream 32-row canonical fixture remains untouched.
+  group: core_dual_engine
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_text_vectorize_full_min
+    inputOverrides:
+      pipeline_text_vectorize_full_min:
+        kind: lance
+        path: fixtures/text/scale/fineweb_edu_vectorize_10k_p4.lance
+        jsonl_mirror: fixtures/text/scale/fineweb_edu_vectorize_10k.jsonl
+        manifest_path: fixtures/text/scale/fineweb_edu_vectorize_10k_p4.manifest.json
+        fixture_id: fineweb_edu_vectorize_10k_p4
+        field: text
+        rows: 10000
+        input_fingerprint: sha256:7475aaa2659f66ee4ca085c6178173db37f95c9f22d02e7b9c340bf71012d8ca
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+    # Formal conclusion is an explicit project decision. Perf-lock warnings
+    # remain visible; violations and incomplete coverage still fail closed.
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

@@ -1,0 +1,79 @@
+schemaVersion: 1
+framework: volcoperatorsim
+mode: plan-only
+platforms:
+  - id: arm
+    arch: aarch64
+    hosts:
+      - role: client
+        hostRef: arm-host
+  - id: x86
+    arch: x86_64
+    hosts:
+      - role: client
+        hostRef: x86-host
+software:
+  volcOperatorSimRepo: https://gitcode.com/XuanYuL5/volc_operator_sim.git
+  volcOperatorSimBaseImage: m.daocloud.io/docker.io/debian:bookworm-slim
+  volcDebianMirrorHost: mirrors.huaweicloud.com
+  volcMiniforgeUrlTemplate: https://mirrors.ustc.edu.cn/github-release/conda-forge/miniforge/LatestRelease/Miniforge3-26.3.2-3-Linux-__ARCH__.sh
+  volcMiniforgeSha256s:
+    arm: 2c113a69297e612b01ca0f320c22a3107a11f2ab9b573d79ac868a175945ce29
+    x86: 848194851a98903134187fbb4ab50efe87b003e0c0f808f97644b7524a62bf2c
+  volcPytorchCpuIndexUrl: https://download.pytorch.org/whl/cpu
+  volcOperatorSimRevision: 56d3b6856895427a0519cbaa437d55443fcb578b
+  volcOperatorSimImages:
+    arm: volc-operator-sim-bench:56d3b685-aarch64
+    x86: volc-operator-sim-bench:56d3b685-x86_64
+  volcOperatorSimContainer: volc-operator-sim-bench
+  hostDataRoot: /home/lxy/de_bench_full
+  dataSourceManifest: data-sources.json
+  daftCondaEnv: xarch
+  dataJuicerCondaEnv: xdj
+  shmSize: 64g
+  volcCpuSets:
+    arm: 4-7
+    x86: 0-3
+  volcObserverCpuSets:
+    arm: '8'
+  volcMemoryNodes:
+    arm: '0'
+    x86: '0'
+  volcVirtualization:
+    arm: bare-metal
+    x86: kvm
+  volcNofileSoft: 65536
+  volcNofileHard: 524288
+  benchmarkTimeout: 14400
+  perfFrequency: 99
+  perfEvents: cycles,instructions,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses,branches,branch-misses,context-switches,cpu-migrations,page-faults
+  minHostFreeGiB: 20
+  volcPrivileged: true
+  profilingTools:
+    - perf
+    - objdump
+    - readelf
+    - py-spy
+hostRefs:
+  arm-host:
+    connect: ssh
+    alias: blue-98
+    capabilities:
+      ssh: true
+      sudo: true
+      docker: true
+      internet: true
+      upload: true
+      download: true
+  x86-host:
+    connect: ssh
+    alias: 85.93.9.221
+    user: root
+    port: 22
+    capabilities:
+      ssh: true
+      sudo: true
+      docker: true
+      internet: true
+      upload: true
+      download: true

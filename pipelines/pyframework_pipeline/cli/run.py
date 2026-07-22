@@ -49,6 +49,7 @@ def cmd_run(args) -> int:
         run_dir,
         resume_from=args.resume_from,
         stop_before=args.stop_before,
+        platforms=args.platform,
         force=args.force,
         yes=args.yes,
     )

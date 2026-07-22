@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "profile": "core_dual_engine-smoke",
+  "notes": "The smoke acceptance uses target-generated minimal data fixtures plus pinned text models. prepare-host-data.sh downloads and verifies every required artifact on the Host before any container starts.",
+  "entries": [
+    {
+      "sourceId": "fasttext-lid-176",
+      "url": "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin",
+      "path": "models/lid.176.bin",
+      "sha256": "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e",
+      "size": 131266198,
+      "required": true
+    },
+    {
+      "sourceId": "datajuicer-en-sentencepiece",
+      "url": "https://dail-wlcb.oss-cn-wulanchabu.aliyuncs.com/data_juicer/models/en.sp.model",
+      "path": "models/en.sp.model",
+      "sha256": "cf8147a573770b4e6c0d4df1dcb75453baa88190706dab406be7711b84f059de",
+      "size": 931348,
+      "required": true
+    },
+    {
+      "sourceId": "datajuicer-en-kenlm",
+      "url": "https://dail-wlcb.oss-cn-wulanchabu.aliyuncs.com/data_juicer/models/en.arpa.bin",
+      "path": "models/en.arpa.bin",
+      "sha256": "04923fccbb4e63005c40f01d66112659416de01accd80d16e366a592289ee07a",
+      "size": 4444690658,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-pooling-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/1_Pooling/config.json",
+      "path": "models/all-MiniLM-L6-v2/1_Pooling/config.json",
+      "sha256": "4be450dde3b0273bb9787637cfbd28fe04a7ba6ab9d36ac48e92b11e350ffc23",
+      "size": 190,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/config.json",
+      "path": "models/all-MiniLM-L6-v2/config.json",
+      "sha256": "953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41",
+      "size": 612,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-st-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/config_sentence_transformers.json",
+      "path": "models/all-MiniLM-L6-v2/config_sentence_transformers.json",
+      "sha256": "061ca9d39661d6c6d6de5ba27f79a1cd5770ea247f8d46412a68a498dc5ac9f3",
+      "size": 116,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-data-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/data_config.json",
+      "path": "models/all-MiniLM-L6-v2/data_config.json",
+      "sha256": "32edcb108fc2516b920734a862ae0692bcae1c5d45d5f8d972cb0d53434a4c54",
+      "size": 39265,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-model-safetensors",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/model.safetensors",
+      "path": "models/all-MiniLM-L6-v2/model.safetensors",
+      "sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+      "size": 90868376,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-modules",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/modules.json",
+      "path": "models/all-MiniLM-L6-v2/modules.json",
+      "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+      "size": 349,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-sentence-bert-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/sentence_bert_config.json",
+      "path": "models/all-MiniLM-L6-v2/sentence_bert_config.json",
+      "sha256": "fc1993fde0a95c24ec6c022539d41cf6e2f7c9721e5415d6fb6897472a9cd4b7",
+      "size": 53,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-special-tokens",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/special_tokens_map.json",
+      "path": "models/all-MiniLM-L6-v2/special_tokens_map.json",
+      "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3",
+      "size": 112,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-tokenizer",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/tokenizer.json",
+      "path": "models/all-MiniLM-L6-v2/tokenizer.json",
+      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+      "size": 466247,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-tokenizer-config",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/tokenizer_config.json",
+      "path": "models/all-MiniLM-L6-v2/tokenizer_config.json",
+      "sha256": "acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b",
+      "size": 350,
+      "required": true
+    },
+    {
+      "sourceId": "sentence-transformers-all-minilm-l6-v2-vocab",
+      "url": "https://hf-mirror.com/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/vocab.txt",
+      "path": "models/all-MiniLM-L6-v2/vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+      "size": 231508,
+      "required": true
+    }
+  ]
+}

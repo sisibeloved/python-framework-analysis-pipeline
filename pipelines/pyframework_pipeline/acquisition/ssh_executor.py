@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 
 _SCP_TIMEOUT_SECONDS = 300
 _SFTP_TIMEOUT_SECONDS = 30
+_SERVER_ALIVE_COUNT_MAX = 4
+_CONTROL_PATH = f"/tmp/pyframework-ssh-{getattr(os, 'getuid', lambda: 'user')()}-%C"
 
 
 class SshExecutor:
@@ -51,7 +53,10 @@ class SshExecutor:
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=15",
             "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
+            "-o", f"ServerAliveCountMax={_SERVER_ALIVE_COUNT_MAX}",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPersist=600",
+            "-o", f"ControlPath={_CONTROL_PATH}",
         ])
         return args
 
@@ -67,7 +72,10 @@ class SshExecutor:
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=15",
             "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
+            "-o", f"ServerAliveCountMax={_SERVER_ALIVE_COUNT_MAX}",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPersist=600",
+            "-o", f"ControlPath={_CONTROL_PATH}",
         ])
         return args
 
@@ -83,7 +91,10 @@ class SshExecutor:
             )
             command = f"{exports} && {command}"
         # Use login shell so PATH includes /usr/bin, /usr/local/bin, etc.
-        args.append(f"bash -lc {subprocess.list2cmdline([command])}")
+        # OpenSSH passes this string through the remote user's POSIX shell.
+        # Quote for that shell so variables and substitutions are evaluated
+        # exactly once by the requested login shell, not by its parent.
+        args.append(f"bash -lc {shlex.quote(command)}")
         return args
 
     def run(self, command: str, timeout: int = 300, stream: bool = False) -> subprocess.CompletedProcess[str]:
@@ -276,7 +287,7 @@ class SshExecutor:
         return self._scp_transfer(
             str(local_path),
             f"{target}:{remote_path}",
-            legacy_first=False,
+            legacy_first=True,
         )
 
     def push_dir(self, local_dir: Path, remote_dir: str) -> bool:
@@ -288,15 +299,85 @@ class SshExecutor:
             recursive=True,
         )
 
-    def fetch_dir(self, remote_dir: str, local_dir: Path) -> bool:
+    def fetch_dir(
+        self,
+        remote_dir: str,
+        local_dir: Path,
+        *,
+        timeout: int | None = None,
+    ) -> bool:
         """Download a directory from the remote host via scp -r."""
+        transfer_timeout = timeout or _SCP_TIMEOUT_SECONDS
         local_dir.mkdir(parents=True, exist_ok=True)
+        if self._fetch_dir_via_ssh_tar(
+            remote_dir, local_dir, timeout=transfer_timeout
+        ):
+            return True
         target = f"{self.user}@{self.host}" if self.user else self.host
         return self._scp_transfer(
             f"{target}:{remote_dir}/.",
             str(local_dir),
             recursive=True,
+            timeout=transfer_timeout,
         )
+
+    def _fetch_dir_via_ssh_tar(
+        self,
+        remote_dir: str,
+        local_dir: Path,
+        *,
+        timeout: int = _SCP_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Fetch directory contents without relying on SFTP or legacy scp syntax."""
+
+        archive = local_dir.parent / f".{local_dir.name}.remote-{os.getpid()}.tar"
+        archive.unlink(missing_ok=True)
+        command = f"tar -C {shlex.quote(remote_dir)} -cf - ."
+        try:
+            with archive.open("wb") as output:
+                result = subprocess.run(
+                    self._build_ssh_args(command),
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                    check=False,
+                )
+            if result.returncode != 0:
+                stderr = _coerce_timeout_text(result.stderr)
+                log.warning(
+                    "SSH tar fetch failed with exit %s: %s",
+                    result.returncode,
+                    stderr[:500],
+                )
+                return False
+            extracted = subprocess.run(
+                [
+                    "tar",
+                    "--no-same-owner",
+                    "--no-same-permissions",
+                    "-xf",
+                    str(archive),
+                    "-C",
+                    str(local_dir),
+                ],
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            if extracted.returncode != 0:
+                stderr = _coerce_timeout_text(extracted.stderr)
+                log.warning(
+                    "local tar extract failed with exit %s: %s",
+                    extracted.returncode,
+                    stderr[:500],
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            log.warning("SSH tar fetch timed out for %s", remote_dir)
+            return False
+        finally:
+            archive.unlink(missing_ok=True)
 
     def docker_exec(self, container: str, command: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
         """Execute a command inside a Docker container on the remote host."""

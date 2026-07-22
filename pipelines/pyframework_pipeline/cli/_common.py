@@ -26,6 +26,9 @@ def load_adapter(framework: str):
     if framework == "udfbenchmarking":
         from ..adapters.udfbenchmarking.environment import UdfBenchmarkingEnvironmentAdapter
         return UdfBenchmarkingEnvironmentAdapter()
+    if framework == "volcoperatorsim":
+        from ..adapters.volcoperatorsim.environment import VolcOperatorSimEnvironmentAdapter
+        return VolcOperatorSimEnvironmentAdapter()
     raise ValueError(f"No environment adapter for framework: {framework}")
 
 
@@ -37,7 +40,10 @@ def now_date_str() -> str:
 def run_requires_bridge_token(stop_before: str | None) -> bool:
     if stop_before is None:
         return True
-    step_ids = ["3", "4", "5a", "5b", "5b.1", "5b.2", "5b.2b", "5b.3", "5c", "6", "6b", "7"]
+    step_ids = [
+        "3", "4", "5a", "5a.1", "5a.2", "5b", "5b.1", "5b.2",
+        "5b.2b", "5b.3", "5c", "5d", "6", "6b", "7",
+    ]
     if stop_before not in step_ids:
         return True
     return step_ids.index(stop_before) > step_ids.index("7")

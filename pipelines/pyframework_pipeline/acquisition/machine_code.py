@@ -30,8 +30,67 @@ _LIB_SEARCH_DIRS = [
 ]
 
 
-def _discover_libs_from_perf(records_csv: Path) -> dict[str, list[str]]:
-    """Read perf_records.csv and return {shared_object: [top_symbols]}."""
+def _parse_float(value: str | None) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_asm_candidate(so: str, sym: str) -> bool:
+    so = so.strip()
+    sym = sym.strip()
+    if not so or not sym:
+        return False
+    if so == "(deleted)" or (so.startswith("[") and so.endswith("]")):
+        return False
+    if sym.startswith("0x"):
+        return False
+    if len(sym) >= 8 and all(c in "0123456789abcdef" for c in sym.lower()):
+        return False
+    return True
+
+
+def _discover_from_symbol_hotspots(
+    hotspots_csv: Path,
+    *,
+    max_symbols_per_so: int,
+) -> dict[str, list[str]]:
+    if not hotspots_csv.exists():
+        return {}
+    so_to_syms: dict[str, list[str]] = {}
+    try:
+        with open(hotspots_csv, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                sym = (row.get("symbol") or "").strip()
+                so = (row.get("shared_object") or "").strip()
+                if not _is_asm_candidate(so, sym):
+                    continue
+                if _parse_float(row.get("self_share")) <= 0:
+                    continue
+                syms = so_to_syms.setdefault(so, [])
+                if sym not in syms and len(syms) < max_symbols_per_so:
+                    syms.append(sym)
+    except Exception:
+        return {}
+    return so_to_syms
+
+
+def _discover_libs_from_perf(records_csv: Path, max_symbols_per_so: int = 30) -> dict[str, list[str]]:
+    """Return {shared_object: [top_symbols]} for real objdump candidates.
+
+    Prefer aggregated symbol_hotspots.csv when available.  Raw perf rows are
+    often split by thread/command, which can hide real symbols behind many
+    low-self records and overrepresent pseudo DSOs such as ``(deleted)``.
+    """
+    hotspots_csv = records_csv.parent.parent / "tables" / "symbol_hotspots.csv"
+    hotspots = _discover_from_symbol_hotspots(
+        hotspots_csv,
+        max_symbols_per_so=max_symbols_per_so,
+    )
+    if hotspots:
+        return hotspots
+
     if not records_csv.exists():
         return {}
     so_to_syms: dict[str, list[str]] = {}
@@ -40,7 +99,7 @@ def _discover_libs_from_perf(records_csv: Path) -> dict[str, list[str]]:
             for row in csv.DictReader(f):
                 sym = (row.get("symbol") or "").strip()
                 so = (row.get("shared_object") or "").strip()
-                if not sym or sym.startswith("0x") or so in ("", "[unknown]", "[kernel.kallsyms]"):
+                if not _is_asm_candidate(so, sym):
                     continue
                 so_to_syms.setdefault(so, []).append(sym)
     except Exception:
@@ -49,7 +108,7 @@ def _discover_libs_from_perf(records_csv: Path) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for so, syms in so_to_syms.items():
         counts = Counter(syms)
-        result[so] = [s for s, _ in counts.most_common(30)]
+        result[so] = [s for s, _ in counts.most_common(max_symbols_per_so)]
     return result
 
 

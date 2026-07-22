@@ -261,6 +261,72 @@ def validate_pipeline_config(
                     "software.benchmarkConfigFile",
                     "UDF_Benchmarking benchmarkConfigFile must be relative to the workload directory",
                 )
+        elif framework == "volcoperatorsim":
+            volc_images = software.get("volcOperatorSimImages", {})
+            if not volc_images:
+                add(
+                    "software.volcOperatorSimImages",
+                    "environment.yaml missing software.volcOperatorSimImages",
+                )
+            else:
+                for platform in platforms:
+                    if str(platform) not in volc_images:
+                        add(
+                            f"software.volcOperatorSimImages.{platform}",
+                            f"missing Volc Operator Sim image for platform {platform}",
+                        )
+            required_volc_fields = (
+                "volcOperatorSimRepo",
+                "volcOperatorSimRevision",
+                "hostDataRoot",
+                "dataSourceManifest",
+                "daftCondaEnv",
+                "dataJuicerCondaEnv",
+            )
+            for field in required_volc_fields:
+                if not software.get(field):
+                    add(
+                        f"software.{field}",
+                        f"environment.yaml missing software.{field}",
+                    )
+            revision = str(software.get("volcOperatorSimRevision", ""))
+            if revision and (
+                len(revision) != 40
+                or any(ch not in "0123456789abcdefABCDEF" for ch in revision)
+            ):
+                add(
+                    "software.volcOperatorSimRevision",
+                    "Volc Operator Sim revision must be a 40-character git SHA",
+                )
+            host_root = str(software.get("hostDataRoot", ""))
+            if host_root and not Path(host_root).is_absolute():
+                add(
+                    "software.hostDataRoot",
+                    "Volc Operator Sim hostDataRoot must be an absolute path",
+                )
+            manifest = str(software.get("dataSourceManifest", ""))
+            if manifest and not (project_path.parent / manifest).is_file():
+                add(
+                    "software.dataSourceManifest",
+                    f"data source manifest not found: {project_path.parent / manifest}",
+                )
+
+            operator_analysis = workload.get("operatorAnalysis", {})
+            if operator_analysis and not isinstance(operator_analysis, dict):
+                add(
+                    "workload.operatorAnalysis",
+                    "operatorAnalysis must be a mapping",
+                )
+            elif isinstance(operator_analysis, dict):
+                for field in ("rounds", "warmup", "minPerfSamples", "topSymbols"):
+                    value = operator_analysis.get(field)
+                    if value is not None and (
+                        not isinstance(value, int) or isinstance(value, bool) or value < 0
+                    ):
+                        add(
+                            f"workload.operatorAnalysis.{field}",
+                            f"operatorAnalysis.{field} must be a non-negative integer",
+                        )
         else:
             add("framework", f"unsupported environment framework: {framework}")
 

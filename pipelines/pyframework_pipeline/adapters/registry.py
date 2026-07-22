@@ -48,8 +48,10 @@ def _load_builtin_adapters() -> None:
     from .datajuicer.adapter import DataJuicerAdapter as _DataJuicerAdapter
     from .pyflink.adapter import PyFlinkAdapter as _PyFlinkAdapter
     from .udfbenchmarking.adapter import UdfBenchmarkingAdapter as _UdfBenchmarkingAdapter
+    from .volcoperatorsim.adapter import VolcOperatorSimAdapter as _VolcOperatorSimAdapter
 
     cast(object, _DataJuicerAdapter)
     cast(object, _PyFlinkAdapter)
     cast(object, _UdfBenchmarkingAdapter)
+    cast(object, _VolcOperatorSimAdapter)
     _BUILTINS_LOADED = True

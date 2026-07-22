@@ -120,6 +120,35 @@ class AsmCollectorTest(unittest.TestCase):
             output = json.loads(result.stdout)
             self.assertEqual(output["status"], "skipped")
 
+    def test_discovers_real_asm_candidates_from_symbol_hotspots(self) -> None:
+        from pipelines.pyframework_pipeline.acquisition.machine_code import (
+            _discover_libs_from_perf,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "perf" / "data" / "perf_records.csv"
+            hotspots = root / "perf" / "tables" / "symbol_hotspots.csv"
+            records.parent.mkdir(parents=True)
+            hotspots.parent.mkdir(parents=True)
+            records.write_text(
+                "shared_object,symbol,self\n"
+                "[vdso],__kernel_clock_gettime,1.0\n"
+                "(deleted),jit_deleted_symbol,2.0\n",
+                encoding="utf-8",
+            )
+            hotspots.write_text(
+                "shared_object,symbol,self_share\n"
+                "[vdso],__kernel_clock_gettime,1.0\n"
+                "(deleted),jit_deleted_symbol,2.0\n"
+                "libscipy_openblas64_-7220728c.so,blas_thread_server,0.15\n",
+                encoding="utf-8",
+            )
+
+            result = _discover_libs_from_perf(records)
+
+        self.assertEqual(result, {"libscipy_openblas64_-7220728c.so": ["blas_thread_server"]})
+
 
 class AcquisitionValidateTest(unittest.TestCase):
     """Test acquire validate command."""
@@ -225,12 +254,15 @@ class _FakeExecutor:
     """Minimal executor stub for unit-testing orchestrator helpers."""
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        self.pushed_manifests: list[dict] = []
     def run(self, cmd: str, **kw):
         self.calls.append(cmd)
         from collections import namedtuple
         R = namedtuple("R", "returncode stdout stderr")
         return R(0, "", "")
     def push_file(self, local, remote):
+        if str(remote).endswith("_manifest.json"):
+            self.pushed_manifests.append(json.loads(Path(local).read_text(encoding="utf-8")))
         return True
     def fetch_file(self, remote, local):
         return True
@@ -266,6 +298,76 @@ class SymbolMapLogicTest(unittest.TestCase):
 
 class LibSearchLogicTest(unittest.TestCase):
     """Test the library-finding logic from the in-container ASM script."""
+
+    def test_asm_manifest_uses_real_symbol_hotspots(self):
+        from pipelines.pyframework_pipeline.orchestrator import _collect_asm_from_all_libs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            perf_dir = root / "perf" / "data"
+            asm_dir = root / "asm" / "arm64"
+            perf_dir.mkdir(parents=True)
+            (root / "perf" / "tables").mkdir(parents=True)
+            asm_dir.mkdir(parents=True)
+            (perf_dir / "perf_records.csv").write_text(
+                "shared_object,symbol,self\n"
+                "[vdso],__kernel_clock_gettime,1.0\n"
+                "(deleted),jit_deleted_symbol,2.0\n",
+                encoding="utf-8",
+            )
+            (root / "perf" / "tables" / "symbol_hotspots.csv").write_text(
+                "shared_object,symbol,self_share\n"
+                "[vdso],__kernel_clock_gettime,1.0\n"
+                "(deleted),jit_deleted_symbol,2.0\n"
+                "libscipy_openblas64_-7220728c.so,blas_thread_server,0.15\n",
+                encoding="utf-8",
+            )
+            executor = _FakeExecutor()
+
+            _collect_asm_from_all_libs(
+                executor, perf_dir, asm_dir, "arm", "udf-benchmarking-bench"
+            )
+
+        self.assertEqual(len(executor.pushed_manifests), 1)
+        self.assertEqual(
+            executor.pushed_manifests[0]["so_to_syms"],
+            {"libscipy_openblas64_-7220728c.so": ["blas_thread_server"]},
+        )
+
+    def test_asm_collection_repairs_local_symbol_map_from_fetched_files(self):
+        from hashlib import md5
+
+        from pipelines.pyframework_pipeline.orchestrator import _collect_asm_from_all_libs
+
+        class FetchingFakeExecutor(_FakeExecutor):
+            def fetch_dir(self, remote, local):
+                symbol_hash = md5(b"blas_thread_server").hexdigest()[:8]
+                Path(local, f"{symbol_hash}.s").write_text("disassembly", encoding="utf-8")
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            perf_dir = root / "perf" / "data"
+            asm_dir = root / "asm" / "arm64"
+            perf_dir.mkdir(parents=True)
+            (root / "perf" / "tables").mkdir(parents=True)
+            asm_dir.mkdir(parents=True)
+            (perf_dir / "perf_records.csv").write_text(
+                "shared_object,symbol,self\n",
+                encoding="utf-8",
+            )
+            (root / "perf" / "tables" / "symbol_hotspots.csv").write_text(
+                "shared_object,symbol,self_share\n"
+                "libscipy_openblas64_-7220728c.so,blas_thread_server,0.15\n",
+                encoding="utf-8",
+            )
+
+            _collect_asm_from_all_libs(
+                FetchingFakeExecutor(), perf_dir, asm_dir, "arm", "udf-benchmarking-bench"
+            )
+            symbol_map = json.loads((asm_dir / "symbol_map.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(symbol_map, {"b2d087c9": "blas_thread_server"})
 
     def _run_find(self, so_name, fake_fs: dict[str, list[str]]) -> str | None:
         """Simulate the library search from the in-container script.

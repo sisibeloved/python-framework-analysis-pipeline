@@ -394,6 +394,147 @@ class EnvironmentValidateTest(unittest.TestCase):
 class EnvironmentDeployRecordTest(unittest.TestCase):
     """Test deploy outputs validate-ready record files."""
 
+    def test_deploy_retries_read_only_step_after_ssh_transport_failure(self) -> None:
+        from pyframework_pipeline.environment.deploy import deploy_plan
+
+        class FlakyExecutor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return SimpleNamespace(
+                        returncode=255,
+                        stdout="",
+                        stderr="Timeout, server test-host not responding.\n",
+                    )
+                return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+            def push_file(self, *_args, **_kwargs):
+                return True
+
+        executor = FlakyExecutor()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = {
+                "schemaVersion": 1,
+                "projectId": "volc-test",
+                "platform": "arm",
+                "planHash": "sha256:test",
+                "steps": [
+                    {
+                        "id": "probe-os",
+                        "kind": "host-probe",
+                        "hostRef": "arm-host",
+                        "command": "uname -a",
+                        "description": "Probe host OS",
+                        "mutatesHost": False,
+                    }
+                ],
+            }
+            plan_path = tmp_dir / "environment-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            with patch(
+                "pyframework_pipeline.environment.deploy.build_executor",
+                return_value=executor,
+            ):
+                result = deploy_plan(
+                    PROJECT_YAML,
+                    "arm",
+                    plan_path,
+                    output_dir=tmp_dir,
+                    yes=True,
+                )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(executor.calls, 2)
+
+    def test_deploy_does_not_retry_mutating_step_after_ssh_transport_failure(self) -> None:
+        from pyframework_pipeline.environment.deploy import deploy_plan
+
+        class FailingExecutor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run(self, *_args, **_kwargs):
+                self.calls += 1
+                return SimpleNamespace(
+                    returncode=255,
+                    stdout="",
+                    stderr="Timeout, server test-host not responding.\n",
+                )
+
+            def push_file(self, *_args, **_kwargs):
+                return True
+
+        executor = FailingExecutor()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = {
+                "schemaVersion": 1,
+                "projectId": "volc-test",
+                "platform": "arm",
+                "planHash": "sha256:test",
+                "steps": [
+                    {
+                        "id": "start-container",
+                        "kind": "framework-start",
+                        "hostRef": "arm-host",
+                        "command": "docker run test-image",
+                        "description": "Start container",
+                        "mutatesHost": True,
+                    }
+                ],
+            }
+            plan_path = tmp_dir / "environment-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            with patch(
+                "pyframework_pipeline.environment.deploy.build_executor",
+                return_value=executor,
+            ):
+                result = deploy_plan(
+                    PROJECT_YAML,
+                    "arm",
+                    plan_path,
+                    output_dir=tmp_dir,
+                    yes=True,
+                )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failedStep"]["exitCode"], 255)
+        self.assertEqual(executor.calls, 1)
+
+    def test_deploy_generates_plan_with_current_adapter_loader(self) -> None:
+        from pyframework_pipeline.environment.deploy import deploy_plan
+
+        class FakeExecutor:
+            def run(self, *_args, **_kwargs):
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            def push_file(self, *_args, **_kwargs):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+
+            with patch(
+                "pyframework_pipeline.environment.deploy.build_executor",
+                return_value=FakeExecutor(),
+            ):
+                result = deploy_plan(
+                    PROJECT_YAML,
+                    "arm",
+                    plan_path=None,
+                    output_dir=tmp_dir,
+                    yes=True,
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue((tmp_dir / "deploy-record.json").exists())
+
     def test_deploy_writes_environment_record_and_readiness_report(self) -> None:
         from pyframework_pipeline.environment.deploy import deploy_plan
 
@@ -455,6 +596,113 @@ class EnvironmentDeployRecordTest(unittest.TestCase):
         self.assertIn("note", mutating)
         self.assertEqual(readiness["status"], "ready")
         self.assertEqual(readiness["checks"][0]["id"], "readiness-cluster-health")
+
+    def test_deploy_captures_structured_environment_fingerprint(self) -> None:
+        import base64
+        from pyframework_pipeline.environment.deploy import deploy_plan
+
+        fingerprint = {
+            "sourceRevision": "a" * 40,
+            "imageId": "sha256:image",
+            "containerId": "container-id",
+            "condaFingerprints": {"xarch": "x", "xdj": "y"},
+            "perf": {"cyclesAvailable": True, "callGraphAvailable": True},
+        }
+        marker = "PYFRAMEWORK_ENV_FINGERPRINT=" + base64.b64encode(
+            json.dumps(fingerprint).encode("utf-8")
+        ).decode("ascii")
+
+        class FakeExecutor:
+            def run(self, *_args, **_kwargs):
+                return SimpleNamespace(returncode=0, stdout=marker + "\n", stderr="")
+
+            def push_file(self, *_args, **_kwargs):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = {
+                "schemaVersion": 1,
+                "projectId": "volc-test",
+                "platform": "arm",
+                "planHash": "sha256:test",
+                "steps": [
+                    {
+                        "id": "record-volc-environment",
+                        "kind": "framework-fingerprint",
+                        "hostRef": "arm-host",
+                        "command": "true",
+                        "captureOutput": True,
+                    }
+                ],
+            }
+            plan_path = tmp_dir / "environment-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with patch(
+                "pyframework_pipeline.environment.deploy.build_executor",
+                return_value=FakeExecutor(),
+            ):
+                result = deploy_plan(
+                    PROJECT_YAML,
+                    "arm",
+                    plan_path,
+                    output_dir=tmp_dir,
+                    yes=True,
+                )
+            record = json.loads(
+                (tmp_dir / "environment-record.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(record["environmentFingerprint"], fingerprint)
+        self.assertEqual(record["sourceRevision"], "a" * 40)
+        self.assertEqual(record["imageId"], "sha256:image")
+        self.assertIn("stdout", record["steps"][0])
+
+    def test_deploy_rejects_missing_required_fingerprint_marker(self) -> None:
+        from pyframework_pipeline.environment.deploy import deploy_plan
+
+        class FakeExecutor:
+            def run(self, *_args, **_kwargs):
+                return SimpleNamespace(returncode=0, stdout="not-a-marker\n", stderr="")
+
+            def push_file(self, *_args, **_kwargs):
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = {
+                "schemaVersion": 1,
+                "projectId": "volc-test",
+                "platform": "arm",
+                "planHash": "sha256:test",
+                "steps": [
+                    {
+                        "id": "record-volc-environment",
+                        "kind": "framework-fingerprint",
+                        "hostRef": "arm-host",
+                        "command": "true",
+                        "captureOutput": True,
+                    }
+                ],
+            }
+            plan_path = tmp_dir / "environment-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            with patch(
+                "pyframework_pipeline.environment.deploy.build_executor",
+                return_value=FakeExecutor(),
+            ):
+                result = deploy_plan(
+                    PROJECT_YAML,
+                    "arm",
+                    plan_path,
+                    output_dir=tmp_dir,
+                    yes=True,
+                )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failedStep"]["id"], "record-volc-environment")
+        self.assertIn("fingerprint marker", result["failedStep"]["stderr"])
 
 
 class EnvironmentPreflightTest(unittest.TestCase):
@@ -694,6 +942,20 @@ class SshExecutorEnvTest(unittest.TestCase):
         remote_cmd = args[-1]
         self.assertNotIn("export", remote_cmd)
 
+    def test_remote_login_shell_preserves_inner_variable_expansion(self) -> None:
+        from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
+
+        executor = SshExecutor(host="myhost")
+        remote_cmd = executor._build_ssh_args(
+            'value=kept; [ "$value" = kept ]'
+        )[-1]
+
+        result = subprocess.run(
+            ["bash", "-c", remote_cmd], text=True, capture_output=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_env_values_are_shell_escaped(self) -> None:
         from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
 
@@ -720,9 +982,17 @@ class SshExecutorEnvTest(unittest.TestCase):
         self.assertIn(str(ssh_config), ssh_args)
         self.assertIn("-F", scp_args)
         self.assertIn(str(ssh_config), scp_args)
-        for option in ("ConnectTimeout=15", "ServerAliveInterval=15", "ServerAliveCountMax=2"):
+        for option in (
+            "ConnectTimeout=15",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=4",
+            "ControlMaster=auto",
+            "ControlPersist=600",
+        ):
             self.assertIn(option, ssh_args)
             self.assertIn(option, scp_args)
+        self.assertTrue(any(option.startswith("ControlPath=/tmp/pyframework-ssh-") for option in ssh_args))
+        self.assertTrue(any(option.startswith("ControlPath=/tmp/pyframework-ssh-") for option in scp_args))
 
     def test_fetch_file_prefers_sftp_scp_with_timeout(self) -> None:
         from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
@@ -811,7 +1081,7 @@ class SshExecutorEnvTest(unittest.TestCase):
             self.assertEqual(local_path.read_text(encoding="utf-8"), "old-good-data")
             self.assertEqual(list(Path(tmp).glob("*.tmp-*")), [])
 
-    def test_push_file_prefers_sftp_scp_with_timeout(self) -> None:
+    def test_push_file_prefers_legacy_scp_for_unstable_sftp_hosts(self) -> None:
         from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
 
         executor = SshExecutor(host="myhost")
@@ -832,10 +1102,48 @@ class SshExecutorEnvTest(unittest.TestCase):
         self.assertTrue(ok)
         args = run.call_args.args[0]
         self.assertEqual(args[0], "scp")
-        self.assertNotIn("-O", args)
+        self.assertIn("-O", args)
         self.assertIn(str(local_path), args)
         self.assertIn("myhost:/tmp/script.py", args)
-        self.assertEqual(run.call_args.kwargs["timeout"], 30)
+        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+
+    def test_fetch_dir_prefers_ssh_tar_stream(self) -> None:
+        from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
+
+        executor = SshExecutor(host="myhost")
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[0] == "ssh":
+                kwargs["stdout"].write(b"tar-payload")
+                return subprocess.CompletedProcess(args, 0, b"", b"")
+            if args[0] == "tar":
+                destination = Path(args[args.index("-C") + 1])
+                (destination / "summary.json").write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0, b"", b"")
+            raise AssertionError(args)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            local_dir = Path(tmp) / "results"
+            with patch(
+                "pyframework_pipeline.acquisition.ssh_executor.subprocess.run",
+                side_effect=fake_run,
+            ):
+                ok = executor.fetch_dir(
+                    "/remote/results", local_dir, timeout=901
+                )
+
+            self.assertTrue(ok)
+            self.assertTrue((local_dir / "summary.json").is_file())
+            self.assertEqual(list(Path(tmp).glob(".*.remote-*.tar")), [])
+
+        self.assertEqual(calls[0][0][0], "ssh")
+        self.assertIn("tar -C /remote/results -cf - .", calls[0][0][-1])
+        self.assertEqual(calls[0][1]["timeout"], 901)
+        self.assertEqual(calls[1][0][0], "tar")
+        self.assertEqual(calls[1][1]["timeout"], 901)
+        self.assertNotIn("scp", [call[0][0] for call in calls])
 
     def test_run_timeout_returns_completed_process(self) -> None:
         import subprocess

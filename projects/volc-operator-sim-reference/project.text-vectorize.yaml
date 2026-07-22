@@ -1,0 +1,30 @@
+id: volc-operator-sim-text-vectorize
+name: Volc Operator Sim Text Vectorize Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  # The formal suite default stays unchanged. Operator analysis selects the
+  # upstream Daft-only group and the single real-BGE task below.
+  group: core_dual_engine
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_text_vectorize_full_min
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

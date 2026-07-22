@@ -7,6 +7,7 @@ in pipeline-run.json for resume-from-failure.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import textwrap
@@ -28,21 +29,27 @@ STEP_DEFS: list[dict[str, str]] = [
     {"step": "3",      "name": "environment deploy"},
     {"step": "4",      "name": "workload deploy"},
     {"step": "5a",     "name": "benchmark run"},
+    {"step": "5a.1",   "name": "operator context timing"},
+    {"step": "5a.2",   "name": "isolated operator timing"},
     {"step": "5b.1",   "name": "collect perf.data"},
     {"step": "5b.2",   "name": "run perf-kits"},
     {"step": "5b.2b",  "name": "extract CPython source"},
     {"step": "5b.3",   "name": "collect objdump ASM"},
     {"step": "5c",     "name": "acquire all"},
+    {"step": "5c.1",   "name": "operator readable reports"},
+    {"step": "5d",     "name": "operator platform compare"},
     {"step": "6",      "name": "backfill run"},
     {"step": "6b",     "name": "platform compare"},
     {"step": "7",      "name": "bridge publish"},
 ]
 
 # Steps that run per-platform (need --platform).
-PER_PLATFORM_STEPS = {"3", "4", "5a", "5b.1", "5b.2", "5b.2b", "5b.3"}
+PER_PLATFORM_STEPS = {
+    "3", "4", "5a", "5a.1", "5a.2", "5b.1", "5b.2", "5b.2b", "5b.3"
+}
 
 # Steps that run once after all platforms.
-GLOBAL_STEPS = {"5c", "6", "6b", "7"}
+GLOBAL_STEPS = {"5c", "5c.1", "5d", "6", "6b", "7"}
 
 # Mapping from old "5b" to its sub-steps (for resume-from backward compat).
 _STEP_ALIASES: dict[str, list[str]] = {
@@ -105,6 +112,13 @@ class PipelineRunState:
                 "platforms": platforms,
                 "steps": [],
             }
+            return
+        merged_platforms = list(
+            dict.fromkeys([*self.data.get("platforms", []), *platforms])
+        )
+        if merged_platforms != self.data.get("platforms"):
+            self.data["platforms"] = merged_platforms
+            self._save()
 
     def is_completed(self, step: str, platform: str | None = None) -> bool:
         for s in self.data.get("steps", []):
@@ -143,7 +157,9 @@ class PipelineRunState:
                 break
         self._save()
 
-    def clear_from(self, step: str) -> None:
+    def clear_from(
+        self, step: str, platforms: list[str] | None = None
+    ) -> None:
         """Remove state entries for *step* and all subsequent steps."""
         step_ids = [d["step"] for d in STEP_DEFS]
         # Resolve aliases (e.g. "5b" -> "5b.1").
@@ -152,9 +168,15 @@ class PipelineRunState:
             return
         cutoff = step_ids.index(resolved)
         clear_ids = set(step_ids[cutoff:])
+        selected_platforms = set(platforms) if platforms is not None else None
         self.data["steps"] = [
             s for s in self.data.get("steps", [])
             if s["step"] not in clear_ids
+            or (
+                s["step"] in PER_PLATFORM_STEPS
+                and selected_platforms is not None
+                and s.get("platform") not in selected_platforms
+            )
         ]
         self._save()
 
@@ -274,6 +296,7 @@ def run_pipeline(
     *,
     resume_from: str | None = None,
     stop_before: str | None = None,
+    platforms: list[str] | None = None,
     force: bool = False,
     yes: bool = False,
 ) -> int:
@@ -291,7 +314,21 @@ def run_pipeline(
     config = load_project_config(project_path)
     project_id = config.get("id", "unknown")
     run_config = get_run_config(project_path)
-    platforms = run_config.get("platforms", [])
+    configured_platforms = list(run_config.get("platforms", []))
+    if platforms is None:
+        selected_platforms = configured_platforms
+    else:
+        selected_platforms = list(dict.fromkeys(platforms))
+        unknown = [p for p in selected_platforms if p not in configured_platforms]
+        if unknown:
+            logger.error(
+                "Selected platform(s) not configured in run.platforms: %s",
+                ", ".join(unknown),
+            )
+            return 1
+        if not selected_platforms:
+            logger.error("At least one platform must be selected")
+            return 1
 
     state_path = run_dir / "pipeline-run.json"
     state = PipelineRunState(state_path)
@@ -299,17 +336,16 @@ def run_pipeline(
     if force:
         state.data = {}
 
-    state.init(project_id, platforms)
+    state.init(project_id, selected_platforms)
 
     # Determine start point.
     step_ids = [d["step"] for d in STEP_DEFS]
     start_idx = 0
-    is_resume = bool(resume_from)
     if resume_from:
         resolved = _resolve_step_alias(resume_from)
         if resolved in step_ids:
             start_idx = step_ids.index(resolved)
-            state.clear_from(resume_from)
+            state.clear_from(resume_from, selected_platforms)
             logger.info("Resuming from step %s — cleared downstream state", resume_from)
         else:
             logger.error("Unknown step: %s. Valid: %s", resume_from, step_ids)
@@ -331,7 +367,7 @@ def run_pipeline(
 
         if step_id in PER_PLATFORM_STEPS:
             # Run for each platform.
-            for plat in platforms:
+            for plat in selected_platforms:
                 if state.is_completed(step_id, plat):
                     logger.info("[S%s/%s] Already completed, skipping", step_id, plat)
                     continue
@@ -342,7 +378,7 @@ def run_pipeline(
                 try:
                     _execute_step(
                         step_id, project_path, run_dir, plat,
-                        yes=yes, force=is_resume,
+                        yes=yes, force=force, platforms=selected_platforms,
                     )
                     state.mark_completed(step_id, plat)
                     logger.info("[S%s/%s] << EXIT %s (ok)", step_id, plat, step_name)
@@ -362,7 +398,7 @@ def run_pipeline(
             try:
                 _execute_step(
                     step_id, project_path, run_dir, None,
-                    yes=yes, force=is_resume,
+                    yes=yes, force=force, platforms=selected_platforms,
                 )
                 state.mark_completed(step_id)
                 logger.info("[S%s] << EXIT %s (ok)", step_id, step_name)
@@ -448,6 +484,7 @@ def _execute_registered_step(
     *,
     yes: bool = False,
     force: bool = False,
+    platforms: list[str] | None = None,
 ) -> bool:
     from .registry import get_registry
     from .steps import register_builtin_steps
@@ -468,6 +505,7 @@ def _execute_registered_step(
             "force": force,
             "environment": env_config,
             "framework_id": env_config.get("framework") if env_config else None,
+            "platforms": platforms,
         },
     )
     registry.get(step_id)().run(ctx)
@@ -482,6 +520,7 @@ def _execute_step(
     *,
     yes: bool = False,
     force: bool = False,
+    platforms: list[str] | None = None,
 ) -> None:
     """Execute a single pipeline step."""
     if _execute_registered_step(
@@ -491,6 +530,7 @@ def _execute_step(
         platform,
         yes=yes,
         force=force,
+        platforms=platforms,
     ):
         return
 
@@ -511,17 +551,40 @@ def _execute_step(
     elif step_id == "5a":
         _run_benchmark(project_path, run_dir, platform, force=force)
 
+    elif step_id == "5a.1":
+        _run_operator_stage(
+            "context", project_path, run_dir, platform, force=force
+        )
+
+    elif step_id == "5a.2":
+        _run_operator_stage(
+            "isolated", project_path, run_dir, platform, force=force
+        )
+
     elif step_id == "5b.1":
-        _run_collect_substep(project_path, run_dir, platform, "5b.1")
+        _run_collect_substep(project_path, run_dir, platform, "5b.1", force=force)
     elif step_id == "5b.2":
-        _run_collect_substep(project_path, run_dir, platform, "5b.2")
+        _run_collect_substep(project_path, run_dir, platform, "5b.2", force=force)
     elif step_id == "5b.2b":
-        _run_collect_substep(project_path, run_dir, platform, "5b.2b")
+        _run_collect_substep(project_path, run_dir, platform, "5b.2b", force=force)
     elif step_id == "5b.3":
-        _run_collect_substep(project_path, run_dir, platform, "5b.3")
+        _run_collect_substep(project_path, run_dir, platform, "5b.3", force=force)
 
     elif step_id == "5c":
-        _run_acquire_all(project_path, run_dir, force=force)
+        _run_acquire_all(
+            project_path, run_dir, force=force, platforms=platforms
+        )
+
+    elif step_id == "5c.1":
+        _run_operator_reports(
+            project_path,
+            run_dir,
+            force=force,
+            platforms=platforms,
+        )
+
+    elif step_id == "5d":
+        _run_operator_compare(project_path, run_dir)
 
     elif step_id == "6":
         _run_backfill(project_path, run_dir, force=force)
@@ -581,6 +644,89 @@ def _run_benchmark(
     return
 
 
+def _run_operator_stage(
+    mode: str,
+    project_path: Path,
+    run_dir: Path,
+    platform: str | None,
+    *,
+    force: bool = False,
+) -> None:
+    """Run an optional operator scope without affecting generic adapters."""
+
+    if platform is None:
+        raise StepError("operator analysis step requires a platform")
+    from .adapters.registry import get_adapter
+    from .config import get_workload_config
+    from .contracts.adapter import OperatorAnalysisAdapter
+
+    adapter = get_adapter(_framework_id_from_project(project_path))
+    if not isinstance(adapter, OperatorAnalysisAdapter):
+        logger.info("Operator analysis is not supported; skipping %s", mode)
+        return
+    workload = get_workload_config(project_path)
+    operator = workload.get("operatorAnalysis") or {}
+    if isinstance(operator, dict) and not bool(operator.get("enabled", True)):
+        logger.info("Operator analysis is disabled; skipping %s", mode)
+        return
+    methods = {
+        "context": adapter.collect_context_timing,
+        "isolated": adapter.collect_operator_timing,
+        "profile": adapter.collect_operator_profiles,
+    }
+    try:
+        method = methods[mode]
+    except KeyError as exc:
+        raise StepError(f"unknown operator stage: {mode}") from exc
+    method(project_path, run_dir, platform, force=force)
+
+
+def _run_operator_compare(project_path: Path, run_dir: Path) -> None:
+    """Compare normalized operator evidence when the adapter supports it."""
+
+    if _framework_id_from_project(project_path) != "volcoperatorsim":
+        logger.info("No operator comparison configured; skipping")
+        return
+    from .adapters.registry import get_adapter
+    from .adapters.volcoperatorsim.operator_compare import (
+        compare_operator_platforms,
+    )
+
+    adapter = get_adapter("volcoperatorsim")
+    for platform in ("arm", "x86"):
+        adapter.normalize_operator_artifacts(
+            project_path, run_dir, platform, force=False
+        )
+
+    compare_operator_platforms(
+        run_dir / "arm", run_dir / "x86", run_dir / "compare" / "operators"
+    )
+
+
+def _run_operator_reports(
+    project_path: Path,
+    run_dir: Path,
+    *,
+    force: bool = False,
+    platforms: list[str] | None = None,
+) -> None:
+    """Normalize acquired Volc evidence and render self-contained reports."""
+
+    if _framework_id_from_project(project_path) != "volcoperatorsim":
+        logger.info("No operator readable report configured; skipping")
+        return
+    from .adapters.registry import get_adapter
+    from .adapters.volcoperatorsim.operator_report import render_operator_reports
+
+    adapter = get_adapter("volcoperatorsim")
+    for platform in platforms or ["arm", "x86"]:
+        adapter.normalize_operator_artifacts(
+            project_path, run_dir, platform, force=force
+        )
+        report = render_operator_reports(run_dir / platform)
+        logger.info("[%s] Operator readable report: %s", platform, report)
+
+
 # Pyflink benchmark helpers now live in adapters/pyflink/benchmark.py; these
 # aliases keep the orchestrator's collect/remote paths working without
 # duplicating the implementations.
@@ -615,6 +761,8 @@ def _perf_records_csv_is_complete(path: Path) -> bool:
 def _run_collect_substep(
     project_path: Path, run_dir: Path, platform: str,
     substep: str,
+    *,
+    force: bool = False,
 ) -> None:
     """Execute a single 5b sub-step.
 
@@ -622,9 +770,19 @@ def _run_collect_substep(
     5b.3 (objdump ASM).  Each checks its own output artifact and skips if present.
     """
     from .config import load_environment_config
-    from .remote import build_executor, get_platform_host_ref
 
     env_config = load_environment_config(project_path)
+    if _framework_id(env_config) == "volcoperatorsim":
+        if substep == "5b.2":
+            _run_operator_stage(
+                "profile", project_path, run_dir, platform, force=force
+            )
+            return
+        _validate_volc_collect_checkpoint(run_dir / platform, substep)
+        return
+
+    from .remote import build_executor, get_platform_host_ref
+
     host_ref = get_platform_host_ref(env_config, platform)
     executor = build_executor(host_ref, env_config)
 
@@ -701,6 +859,45 @@ def _run_collect_substep(
     raise StepError(f"Unknown 5b sub-step: {substep}")
 
 
+def _validate_volc_collect_checkpoint(
+    platform_run_dir: Path, substep: str
+) -> None:
+    """Validate adapter-owned Volc outputs without invoking PyFlink collectors."""
+
+    expected = {
+        "5b.1": (
+            platform_run_dir
+            / "operators"
+            / "manifests"
+            / "pipeline_e2e-COMPLETE.json"
+        ),
+        "5b.2b": (
+            platform_run_dir
+            / "operators"
+            / "manifests"
+            / "operator_case_perf-COMPLETE.json"
+        ),
+        "5b.3": (
+            platform_run_dir
+            / "operators"
+            / "manifests"
+            / "operator_case_perf-COMPLETE.json"
+        ),
+    }
+    artifact = expected.get(substep)
+    if artifact is None:
+        raise StepError(f"Unknown 5b sub-step: {substep}")
+    if not artifact.is_file():
+        raise StepError(
+            f"[{substep}] Volc adapter-owned artifact not found: {artifact}"
+        )
+    logger.info(
+        "[%s] Volc operator acquisition already completed: %s",
+        substep,
+        artifact.relative_to(platform_run_dir),
+    )
+
+
 def _find_perf_container(executor: "SshExecutor", env_config: dict) -> str:
     """Find which container has perf.data."""
     if _framework_id(env_config) == "datajuicer":
@@ -731,6 +928,27 @@ def _load_symbol_map(asm_dir: Path) -> dict[str, str]:
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
+
+
+def _repair_symbol_map_from_collected_files(
+    asm_dir: Path,
+    so_to_syms: dict[str, list[str]],
+) -> None:
+    """Ensure local symbol_map.json matches fetched .s files."""
+    symbol_map = _load_symbol_map(asm_dir)
+    updated = False
+    for syms in so_to_syms.values():
+        for sym in syms:
+            sym_hash = hashlib.md5(sym.encode()).hexdigest()[:8]
+            asm_file = asm_dir / f"{sym_hash}.s"
+            if asm_file.exists() and asm_file.stat().st_size > 0 and symbol_map.get(sym_hash) != sym:
+                symbol_map[sym_hash] = sym
+                updated = True
+    if updated:
+        (asm_dir / "symbol_map.json").write_text(
+            json.dumps(symbol_map, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _extract_cpython_sources(
@@ -913,42 +1131,19 @@ def _collect_asm_from_all_libs(
     symbol_map.json into an output directory.  Then docker cp the results
     back.  Avoids per-library round trips through SSH.
     """
-    import csv
     import tempfile
-    from collections import Counter
+
+    from .acquisition.machine_code import _discover_libs_from_perf
 
     perf_csv = perf_dir / "perf_records.csv"
     if not perf_csv.exists():
         logger.warning("perf_records.csv not found, skipping multi-lib ASM collection")
         return
 
-    # Group symbols by shared_object, filtering to self >= 0.5%.
-    so_to_syms: dict[str, list[str]] = {}
-    try:
-        with open(perf_csv, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                sym = (row.get("symbol") or "").strip()
-                so = (row.get("shared_object") or "").strip()
-                if not sym or sym.startswith("0x") or so in ("", "[unknown]"):
-                    continue
-                if len(sym) >= 8 and all(c in "0123456789abcdef" for c in sym.lower()):
-                    continue
-                if so == "[kernel.kallsyms]":
-                    continue
-                try:
-                    self_pct = float(row.get("self", 0))
-                except (ValueError, TypeError):
-                    continue
-                if self_pct < 0.5:
-                    continue
-                so_to_syms.setdefault(so, []).append(sym)
-    except Exception as e:
-        logger.warning("Failed to read perf_records.csv: %s", e)
+    so_to_syms = _discover_libs_from_perf(perf_csv)
+    if not so_to_syms:
+        logger.warning("No real shared-library symbols found for ASM collection")
         return
-
-    for so, syms in so_to_syms.items():
-        counts = Counter(syms)
-        so_to_syms[so] = [s for s, _ in counts.most_common()]
 
     # Load existing symbol_map so the in-container script can skip collected symbols.
     existing_map = _load_symbol_map(asm_dir)
@@ -1088,6 +1283,7 @@ def _collect_asm_from_all_libs(
     executor.run(f"rm -rf {host_output}", timeout=15)
     executor.run(f"docker cp {container}:/tmp/_asm_output/. {host_output}", timeout=120)
     executor.fetch_dir(host_output, asm_dir)
+    _repair_symbol_map_from_collected_files(asm_dir, so_to_syms)
 
     # Cleanup container + remote host.
     executor.run(f"docker exec {container} rm -rf /tmp/_asm_collect /tmp/_asm_output", timeout=15)
@@ -1325,15 +1521,31 @@ def _collect_binary_from_container(
     return ok
 
 
-def _run_acquire_all(project_path: Path, run_dir: Path, *, force: bool = False) -> None:
+def _run_acquire_all(
+    project_path: Path,
+    run_dir: Path,
+    *,
+    force: bool = False,
+    platforms: list[str] | None = None,
+) -> None:
     from .acquisition.timing import collect_timing
 
     config = load_project_config(project_path)
     run_config = get_run_config(project_path)
-    platforms = run_config.get("platforms", [])
+    if platforms is None:
+        platforms = run_config.get("platforms", [])
 
+    framework = _framework_id_from_project(project_path)
     for plat in platforms:
         plat_dir = run_dir / plat
+        if framework == "volcoperatorsim":
+            from .adapters.volcoperatorsim.acquisition_manifest import (
+                build_acquisition_manifest,
+            )
+
+            manifest = build_acquisition_manifest(plat_dir, platform=plat)
+            logger.info("Volc acquisition manifest %s: %s", plat, manifest)
+            continue
         # Step 5a's _merge_wall_clock_times writes timing-normalized.json
         # directly from container logs.  Only fall back to log-file parsing
         # if step 5a didn't produce the file.
@@ -1362,7 +1574,6 @@ def _run_acquire_all(project_path: Path, run_dir: Path, *, force: bool = False) 
 
 
 def _run_backfill(project_path: Path, run_dir: Path, *, force: bool = False) -> None:
-    from .backfill.pipeline import run_backfill
     from .config import get_run_config
 
     run_config = get_run_config(project_path)
@@ -1373,6 +1584,20 @@ def _run_backfill(project_path: Path, run_dir: Path, *, force: bool = False) -> 
 
     arm_dir = run_dir / platforms[0]
     x86_dir = run_dir / platforms[1]
+
+    if _framework_id_from_project(project_path) == "volcoperatorsim":
+        for platform_dir in (arm_dir, x86_dir):
+            records = platform_dir / "operators" / "operator-records.jsonl"
+            if not records.is_file():
+                raise StepError(
+                    f"Volc normalized operator records missing: {records}"
+                )
+        logger.info(
+            "[S6] Volc adapter normalization already completed during acquisition"
+        )
+        return
+
+    from .backfill.pipeline import run_backfill
 
     rc = run_backfill(project_path, arm_dir, x86_dir)
     if rc != 0:
@@ -1385,8 +1610,6 @@ def _run_backfill(project_path: Path, run_dir: Path, *, force: bool = False) -> 
 
 def _run_compare(project_path: Path, run_dir: Path) -> None:
     """Step 6b: run cross-platform comparison using python-performance-kits."""
-    from .compare.pipeline import run_compare
-
     arm_dir = run_dir / "arm"
     x86_dir = run_dir / "x86"
 
@@ -1394,6 +1617,17 @@ def _run_compare(project_path: Path, run_dir: Path) -> None:
         raise StepError(f"ARM run directory not found: {arm_dir}")
     if not x86_dir.is_dir():
         raise StepError(f"x86 run directory not found: {x86_dir}")
+
+    if _framework_id_from_project(project_path) == "volcoperatorsim":
+        from .adapters.volcoperatorsim.operator_compare import (
+            compare_operator_platforms,
+        )
+
+        compare_operator_platforms(arm_dir, x86_dir, run_dir / "compare")
+        logger.info("[S6b] Volc operator comparison complete: %s", run_dir / "compare")
+        return
+
+    from .compare.pipeline import run_compare
 
     result = run_compare(project_path, arm_dir, x86_dir)
     if result.get("status") != "completed":

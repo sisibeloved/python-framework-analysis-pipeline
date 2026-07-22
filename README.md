@@ -88,6 +88,7 @@ Pipeline 按 Step 1→7 串行执行。从仓库根目录执行 `PYTHONPATH=pipe
 | **5a** | Benchmark | `benchmark run` | • 容器内 workload<br>• `project.yaml` (queries, rows) | • `timing-normalized.json`<br>• `tm-stdout-tm*.log` |
 | **5b** | 数据采集 | `collect run` | • `perf-udf.data` | • `perf_records.csv`<br>• `perf-*.data`<br>• `*.s` (asm) |
 | **5c** | Acquire 汇总 | `acquire all` | • S5a/S5b 全部产物 | • `acquisition-manifest.json` |
+| **5c.1** | 逐算子可读报告 | `operator report` | • `operator-records.jsonl`<br>• acquisition manifest | • `operator-report.html`<br>• pipeline HTML/Markdown |
 | **6** | Backfill 回填 | `backfill run` | • `timing-normalized.json`<br>• `perf_records.csv`<br>• `*.s`<br>• 四层 JSON | • `*.dataset.json`<br>• `*.source.json`<br>• `*.project.json` |
 | **7** | Bridge 桥接 | `bridge publish`<br>`bridge fetch` | • 四层 JSON (functions, artifacts)<br>• `PYFRAMEWORK_BRIDGE_TOKEN` | • GitHub/GitCode Issues |
 
@@ -105,6 +106,7 @@ Pipeline 按 Step 1→7 串行执行。从仓库根目录执行 `PYTHONPATH=pipe
 | 5b | `{platform}/asm/{arm64\|x86_64}/*.s` | 每个热点函数的 objdump 反汇编 | 按符号名命名，如 `memcpy_avx_erms.s` |
 | 5b | `{platform}/asm/objdump/*.s` | 整个 .so 的完整 objdump | 完整库反汇编备份 |
 | 5c | `{platform}/acquisition-manifest.json` | 汇总采集状态的 manifest | 记录各采集器状态和文件清单 |
+| 5c.1 | `{platform}/operators/operator-report.html` | 逐算子报告索引 | 展示算子时长、E2E 占比和算子内 perf CPU 分布 |
 | 6 | `datasets/*.dataset.json` | 四层 Dataset（functions, cases, patterns, rootCauses） | 回填后更新 |
 | 6 | `sources/*.source.json` | 四层 Source（artifactIndex, sourceAnchors） | 含 filePath 或 content 引用 |
 | 6 | `projects/*.project.json` | 四层 Project（bindings） | 绑定 Dataset ↔ Source |

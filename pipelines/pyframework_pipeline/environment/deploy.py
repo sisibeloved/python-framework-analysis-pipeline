@@ -6,6 +6,7 @@ executes each step, and writes an environment-record.json.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from ..acquisition.ssh_executor import SshExecutor
 from ..remote import build_executor, get_platform_host_ref
 
 logger = logging.getLogger(__name__)
+_ENV_FINGERPRINT_MARKER = "PYFRAMEWORK_ENV_FINGERPRINT="
 
 
 def deploy_plan(
@@ -128,8 +130,8 @@ def deploy_plan(
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     else:
         framework = env_config.get("framework", "")
-        from ..cli import _load_adapter
-        adapter = _load_adapter(framework)
+        from ..cli._common import load_adapter
+        adapter = load_adapter(framework)
         plan = generate_plan(project_path, platform_id, adapter)
         plan = json.loads(json.dumps(plan, ensure_ascii=False))
 
@@ -160,6 +162,7 @@ def deploy_plan(
 
     # Execute steps.
     record_steps: list[dict[str, Any]] = []
+    environment_fingerprint: dict[str, Any] | None = None
     passed = 0
     failed = 0
     skipped = 0
@@ -173,6 +176,7 @@ def deploy_plan(
         rollback = step.get("rollbackHint", "")
         script_path = step.get("scriptPath", "")
         step_timeout = step.get("timeout", 0) or 120
+        capture_output = bool(step.get("captureOutput", False))
 
         logger.info("[Step %s] %s", step_id, description)
 
@@ -220,12 +224,25 @@ def deploy_plan(
                 skipped += 1
                 continue
 
-        # Execute.
-        try:
-            result = executor.run(command, timeout=step_timeout, stream=True)
-        except Exception as exc:
-            logger.error("[Step %s] SSH error: %s", step_id, exc)
-            return _fail(step_id, description, command, -1, str(exc))
+        # Execute.  Exit 255 is SSH's transport-failure status, not the
+        # remote command's exit status.  Read-only probes are safe to retry;
+        # mutating steps are deliberately attempted once because the client
+        # cannot know whether the remote side started them before disconnect.
+        max_attempts = 1 if step.get("mutatesHost") else 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = executor.run(command, timeout=step_timeout, stream=True)
+            except Exception as exc:
+                logger.error("[Step %s] SSH error: %s", step_id, exc)
+                return _fail(step_id, description, command, -1, str(exc))
+            if result.returncode != 255 or attempt == max_attempts:
+                break
+            logger.warning(
+                "[Step %s] SSH transport failed (attempt %d/%d); retrying read-only step",
+                step_id,
+                attempt,
+                max_attempts,
+            )
 
         if result.returncode != 0:
             stderr_snippet = result.stderr[:500] if result.stderr else ""
@@ -236,6 +253,20 @@ def deploy_plan(
         else:
             logger.info("[Step %s] Passed", step_id)
             step_record = {"id": step_id, "status": "passed", "exitCode": 0}
+            if capture_output:
+                step_record["stdout"] = result.stdout
+                step_record["stderr"] = result.stderr
+                captured = _parse_environment_fingerprint(result.stdout)
+                if kind == "framework-fingerprint" and captured is None:
+                    return _fail(
+                        step_id,
+                        description,
+                        command,
+                        -1,
+                        "required environment fingerprint marker was not emitted",
+                    )
+                if captured is not None:
+                    environment_fingerprint = captured
             if step.get("mutatesHost"):
                 step_record["note"] = "executed by environment deploy"
             record_steps.append(step_record)
@@ -259,6 +290,18 @@ def deploy_plan(
         },
         "steps": record_steps,
     }
+    if environment_fingerprint is not None:
+        record["environmentFingerprint"] = environment_fingerprint
+        for key in (
+            "sourceRevision",
+            "imageId",
+            "containerId",
+            "dataManifestSha256",
+            "condaFingerprints",
+            "perf",
+        ):
+            if key in environment_fingerprint:
+                record[key] = environment_fingerprint[key]
 
     _save_record(record)
     _save_readiness_report(record, project_id)
@@ -352,3 +395,16 @@ def teardown(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_environment_fingerprint(stdout: str) -> dict[str, Any] | None:
+    for line in reversed(stdout.splitlines()):
+        if not line.startswith(_ENV_FINGERPRINT_MARKER):
+            continue
+        payload = line[len(_ENV_FINGERPRINT_MARKER) :]
+        try:
+            value = json.loads(base64.b64decode(payload).decode("utf-8"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+    return None

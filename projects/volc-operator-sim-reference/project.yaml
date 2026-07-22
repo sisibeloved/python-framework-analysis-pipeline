@@ -1,0 +1,26 @@
+id: volc-operator-sim-reference
+name: Volc Operator Sim Cross-Architecture Operator Analysis
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: core_dual_engine
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm
+    - x86

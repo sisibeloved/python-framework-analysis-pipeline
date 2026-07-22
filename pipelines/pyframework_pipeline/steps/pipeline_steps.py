@@ -85,12 +85,18 @@ class _CollectSubstep:
     def run(self, ctx: RunContext) -> None:
         from .. import orchestrator
 
-        orchestrator._run_collect_substep(
+        args = (
             ctx.project_path,
             ctx.run_dir,
             _platform(ctx),
             self.name,
         )
+        if _force(ctx):
+            orchestrator._run_collect_substep(*args, force=True)
+        else:
+            # Preserve the long-standing four-argument hook ABI for generic
+            # adapters and test/integration replacements.
+            orchestrator._run_collect_substep(*args)
 
 
 @register_step
@@ -134,6 +140,7 @@ class AcquireAllStep:
             ctx.project_path,
             ctx.run_dir,
             force=_force(ctx),
+            platforms=ctx.config.get("platforms"),
         )
 
 

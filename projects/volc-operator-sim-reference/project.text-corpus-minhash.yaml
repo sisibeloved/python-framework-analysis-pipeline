@@ -1,0 +1,32 @@
+id: volc-operator-sim-text-corpus-minhash
+name: Volc Operator Sim Text Corpus MinHash Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  # Formal E2E defaults remain unchanged. Operator analysis selects its own
+  # target group and a single task below.
+  group: core_dual_engine
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    group: dual_engine_candidate
+    tasks:
+      - text_corpus_minhash_dedup
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

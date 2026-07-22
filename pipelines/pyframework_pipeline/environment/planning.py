@@ -36,6 +36,7 @@ class PlanStep:
     description: str = ""
     scriptPath: str = ""   # local script to upload before running
     timeout: int = 0       # seconds, 0 = use default (120s)
+    captureOutput: bool = False  # retain stdout/stderr in environment record
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -55,6 +56,8 @@ class PlanStep:
             d["scriptPath"] = self.scriptPath
         if self.timeout:
             d["timeout"] = self.timeout
+        if self.captureOutput:
+            d["captureOutput"] = True
         return d
 
 
@@ -139,11 +142,18 @@ def generate_plan(
 
     # Framework-specific steps from adapter
     if hasattr(adapter, "get_plan_steps"):
+        import inspect
+
+        adapter_kwargs: dict[str, Any] = {
+            "platform": platform,
+            "platform_config": platform_config,
+            "software": software,
+            "host_refs": host_refs,
+        }
+        if "project_dir" in inspect.signature(adapter.get_plan_steps).parameters:
+            adapter_kwargs["project_dir"] = project_yaml_path.parent
         fw_steps = adapter.get_plan_steps(
-            platform=platform,
-            platform_config=platform_config,
-            software=software,
-            host_refs=host_refs,
+            **adapter_kwargs,
         )
         plan.steps.extend(fw_steps)
 
