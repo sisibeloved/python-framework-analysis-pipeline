@@ -111,6 +111,37 @@ class VolcAcquisitionManifestTest(unittest.TestCase):
         )
         self.assertTrue(report.valid)
 
+    def test_intentionally_skipped_scope_is_a_terminal_manifest_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            platform_dir = Path(tmp) / "arm"
+            plan = platform_dir / "operators/operator-plan.json"
+            plan.parent.mkdir(parents=True)
+            plan.write_text(json.dumps({
+                "runId": "r", "sourceRevision": "5" * 40, "tasks": []
+            }), encoding="utf-8")
+            for scope in (
+                "pipeline_context", "snapshot_build", "operator_case_perf",
+            ):
+                artifact = platform_dir / f"operators/raw/{scope}/evidence.json"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_text("{}", encoding="utf-8")
+            for scope in ("pipeline_e2e", "operator_case_e2e"):
+                marker = platform_dir / f"operators/raw/{scope}/SKIPPED.json"
+                marker.parent.mkdir(parents=True)
+                marker.write_text(json.dumps({
+                    "status": "skipped",
+                    "reason": "bounded representative profile",
+                }), encoding="utf-8")
+
+            manifest_path = build_acquisition_manifest(platform_dir, platform="arm")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["status"], "complete")
+        self.assertEqual(manifest["scopes"]["pipeline_e2e"]["status"], "skipped")
+        self.assertEqual(
+            manifest["scopes"]["operator_case_e2e"]["status"], "skipped"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

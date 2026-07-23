@@ -65,8 +65,14 @@ class VolcAcquisitionSettings:
     perf_frequency: int
     perf_events: str
     min_perf_samples: int = 5000
+    context_perf_enabled: bool = False
+    context_perf_split: bool = False
+    context_perf_frequency: int = 99
+    fast_operator_min_samples: int = 5000
+    context_fast_operator_calls: Mapping[str, int] | None = None
     operator_group: str = ""
     operator_tasks: tuple[str, ...] = ()
+    operator_engines: tuple[str, ...] = ()
     task_input_overrides: Mapping[str, Mapping[str, Any]] | None = None
     workload_cpu_set: str = ""
     observer_cpu_set: str = ""
@@ -206,7 +212,7 @@ def collect_volc_context_timing(
                 settings=settings,
                 scope="pipeline_context",
             )
-            if settings.task_input_overrides
+            if settings.task_input_overrides or settings.context_perf_enabled
             else {}
         )
         for task in plan["tasks"]:
@@ -223,6 +229,9 @@ def collect_volc_context_timing(
                         engine_id,
                     )
                     continue
+                context_mode = (
+                    "perfrecord" if settings.context_perf_enabled else "timing"
+                )
                 command = (
                     _capture_overlay_command(
                         settings=settings,
@@ -231,8 +240,13 @@ def collect_volc_context_timing(
                         engine=engine_id,
                         profile=_full_task_profile("pipeline_context"),
                         case=case,
-                        mode="timing",
+                        mode=context_mode,
                         scope="pipeline_context",
+                        perf_frequency=(
+                            settings.context_perf_frequency
+                            if settings.context_perf_enabled
+                            else None
+                        ),
                     )
                     if full_overlays
                     else _context_command(
@@ -242,12 +256,23 @@ def collect_volc_context_timing(
                         engine_id,
                     )
                 )
-                _run_checked(
-                    executor,
-                    command,
-                    scope="pipeline_context",
-                    timeout=settings.timeout,
-                )
+                def run_context_case() -> bool:
+                    _run_checked(
+                        executor,
+                        command,
+                        scope="pipeline_context",
+                        timeout=settings.timeout,
+                    )
+                    return True
+
+                if settings.context_perf_enabled:
+                    _run_with_profile_cpu_envelope(
+                        executor=executor,
+                        settings=settings,
+                        action=run_context_case,
+                    )
+                else:
+                    run_context_case()
 
     _collect_and_fetch(
         executor=executor,
@@ -257,6 +282,7 @@ def collect_volc_context_timing(
         collect=collect,
         fetch_timeout=settings.timeout,
         platform_dir=context[5],
+        thin_context_perf=settings.context_perf_enabled,
     )
     return output
 
@@ -364,6 +390,41 @@ def collect_volc_operator_profiles(
             return
         if not settings.operator_enabled or not settings.profiling:
             return
+        if settings.context_perf_enabled and settings.context_perf_split:
+            support = _push_context_perf_support(
+                executor=executor,
+                plan=plan,
+                platform_dir=platform_dir,
+                settings=settings,
+            )
+            for task in plan["tasks"]:
+                pipeline_id = str(task["pipelineId"])
+                for engine_value in task["engines"]:
+                    engine = str(engine_value)
+                    _run_checked(
+                        executor,
+                        _context_perf_split_command(
+                            settings=settings,
+                            remote_root=remote_root,
+                            plan_path=support["plan"],
+                            splitter_path=support["splitter"],
+                            symbolizer_path=support["symbolizer"],
+                            pipeline_id=pipeline_id,
+                            engine=engine,
+                        ),
+                        scope="operator_case_perf",
+                        timeout=settings.timeout,
+                    )
+                _run_context_fast_operator_profiles(
+                    executor=executor,
+                    settings=settings,
+                    remote_root=remote_root,
+                    plan=plan,
+                    task=task,
+                    support=support,
+                )
+            _write_case_failures(local_raw, "operator_case_perf", case_failures)
+            return
         overlays = _write_and_push_overlays(
             executor=executor,
             plan=plan,
@@ -403,10 +464,40 @@ def collect_volc_operator_profiles(
         scope="operator_case_perf",
         collect=collect,
         fetch_timeout=settings.timeout,
-        additional_scopes=("snapshot_build",),
+        additional_scopes=(
+            ()
+            if settings.context_perf_enabled and settings.context_perf_split
+            else ("snapshot_build",)
+        ),
         platform_dir=platform_dir,
+        thin_operator_perf=(
+            settings.context_perf_enabled and settings.context_perf_split
+        ),
     )
+    _write_context_perf_skip_markers(platform_dir, settings)
     return output
+
+
+def _write_context_perf_skip_markers(
+    platform_dir: Path, settings: VolcAcquisitionSettings
+) -> None:
+    if not (settings.context_perf_enabled and settings.context_perf_split):
+        return
+    payload = {
+        "schemaVersion": 1,
+        "status": "skipped",
+        "measurementPolicy": "single_pass_context_perf",
+        "reason": (
+            "The frozen per-op E2E run is also the perf source; replaying the "
+            "OCR chain or building isolation snapshots would duplicate the "
+            "dominant workload."
+        ),
+    }
+    for scope in ("pipeline_e2e", "snapshot_build", "operator_case_e2e"):
+        _write_json(
+            platform_dir / "operators" / "raw" / scope / "SKIPPED.json",
+            {**payload, "scope": scope},
+        )
 
 
 def _prepare_volc_stage(
@@ -449,6 +540,7 @@ def _prepare_volc_stage(
     task_documents = _apply_task_input_overrides(
         task_documents, settings.task_input_overrides or {}
     )
+    task_documents = _normalize_real_task_contracts(task_documents)
     platform_dir = run_dir / platform
     environment_path = platform_dir / "environment-record.json"
     environment_payload = (
@@ -469,6 +561,7 @@ def _prepare_volc_stage(
         platform=platform,
         source_revision=settings.revision,
         selected_pipelines=settings.operator_tasks or None,
+        selected_engines=settings.operator_engines or None,
     )
     plan_identity = hashlib.sha256(
         json.dumps(
@@ -484,10 +577,18 @@ def _prepare_volc_stage(
         "group": settings.group,
         "operatorGroup": operator_group,
         "operatorTasks": list(settings.operator_tasks),
+        "operatorEngines": list(settings.operator_engines),
         "taskInputOverrides": settings.task_input_overrides or {},
         "profile": settings.profile,
         "workloadCpuSet": settings.workload_cpu_set,
         "observerCpuSet": settings.observer_cpu_set,
+        "contextPerf": {
+            "enabled": settings.context_perf_enabled,
+            "splitByOperatorBoundary": settings.context_perf_split,
+            "perfFrequency": settings.context_perf_frequency,
+            "fastOperatorMinSamples": settings.fast_operator_min_samples,
+            "fastOperatorCalls": settings.context_fast_operator_calls or {},
+        },
     }
     run_fingerprint_sha = hashlib.sha256(
         json.dumps(
@@ -531,6 +632,8 @@ def _collect_and_fetch(
     fetch_timeout: int,
     additional_scopes: tuple[str, ...] = (),
     platform_dir: Path | None = None,
+    thin_context_perf: bool = False,
+    thin_operator_perf: bool = False,
 ) -> None:
     failure: Exception | None = None
     try:
@@ -560,9 +663,28 @@ def _collect_and_fetch(
     finally:
         fetched_artifacts = []
         for artifact_scope in (*additional_scopes, scope):
+            remote_scope = f"{remote_root}/{artifact_scope}"
+            if thin_context_perf and artifact_scope == "pipeline_context":
+                remote_scope = _prepare_remote_thin_context_view(
+                    executor,
+                    source=remote_scope,
+                    destination=(
+                        f"{remote_root}/transfer-views/pipeline_context-"
+                        f"{time.time_ns()}"
+                    ),
+                )
+            if thin_operator_perf and artifact_scope == "operator_case_perf":
+                remote_scope = _prepare_remote_thin_context_view(
+                    executor,
+                    source=remote_scope,
+                    destination=(
+                        f"{remote_root}/transfer-views/operator_case_perf-"
+                        f"{time.time_ns()}"
+                    ),
+                )
             fetched_artifacts.append(
                 executor.fetch_dir(
-                    f"{remote_root}/{artifact_scope}",
+                    remote_scope,
                     local_raw / artifact_scope,
                     timeout=fetch_timeout,
                 )
@@ -586,6 +708,66 @@ def _collect_and_fetch(
     if platform_dir is not None:
         _write_local_stage_complete(platform_dir, scope)
     (local_raw / f"acquisition-failure-{scope}.json").unlink(missing_ok=True)
+
+
+def _remote_thin_context_view_command(source: str, destination: str) -> str:
+    """Create a hard-linked transfer view without Host-only bulk evidence."""
+
+    program = r'''import os,shutil,sys
+from pathlib import Path
+source=Path(sys.argv[1])
+destination=Path(sys.argv[2])
+skip_files={"perf.data","perf-script.txt","perf-report-period.txt","perf-report-period-resolved-full.txt"}
+skip_dirs={"_symbol-cache","outputs"}
+if not source.is_dir():
+    raise SystemExit(f"context source missing: {source}")
+destination.mkdir(parents=True,exist_ok=False)
+for path in source.rglob("*"):
+    relative=path.relative_to(source)
+    if any(part in skip_dirs for part in relative.parts):
+        continue
+    if path.is_file() and path.name in skip_files:
+        continue
+    target=destination/relative
+    if path.is_dir():
+        target.mkdir(parents=True,exist_ok=True)
+        continue
+    if not path.is_file():
+        continue
+    target.parent.mkdir(parents=True,exist_ok=True)
+    try:
+        os.link(path,target)
+    except OSError:
+        shutil.copy2(path,target)
+print("PYFRAMEWORK_THIN_CONTEXT_VIEW="+str(destination))
+'''
+    return " ".join(
+        (
+            "python3",
+            "-c",
+            shlex.quote(program),
+            shlex.quote(source),
+            shlex.quote(destination),
+        )
+    )
+
+
+def _prepare_remote_thin_context_view(
+    executor: Any, *, source: str, destination: str
+) -> str:
+    result = executor.run(
+        _remote_thin_context_view_command(source, destination), timeout=300
+    )
+    if result.returncode != 0:
+        raise StepError(
+            "failed to prepare thin pipeline_context transfer view: "
+            f"{result.stderr or result.stdout}"
+        )
+    marker = "PYFRAMEWORK_THIN_CONTEXT_VIEW="
+    for line in reversed((result.stdout or "").splitlines()):
+        if line.startswith(marker):
+            return line[len(marker) :]
+    raise StepError("thin pipeline_context transfer view marker missing")
 
 
 def _write_remote_stage_complete(
@@ -1004,6 +1186,28 @@ def _load_settings(
     operator_tasks = tuple(
         dict.fromkeys(str(value) for value in raw_operator_tasks if str(value))
     )
+    raw_operator_engines = operator.get("engines") or []
+    if not isinstance(raw_operator_engines, list):
+        raise ValueError("workload.operatorAnalysis.engines must be a list")
+    operator_engines = tuple(
+        dict.fromkeys(
+            str(value) for value in raw_operator_engines if str(value)
+        )
+    )
+    raw_context_perf = operator.get("contextPerf") or {}
+    context_perf = _mapping(
+        raw_context_perf, "workload.operatorAnalysis.contextPerf"
+    )
+    raw_fast_calls = context_perf.get("fastOperatorCalls") or {}
+    if not isinstance(raw_fast_calls, Mapping):
+        raise ValueError(
+            "workload.operatorAnalysis.contextPerf.fastOperatorCalls "
+            "must be a mapping"
+        )
+    context_fast_operator_calls = {
+        str(name): max(1, int(calls))
+        for name, calls in raw_fast_calls.items()
+    }
     raw_input_overrides = operator.get("inputOverrides") or {}
     if not isinstance(raw_input_overrides, Mapping):
         raise ValueError("workload.operatorAnalysis.inputOverrides must be a mapping")
@@ -1062,8 +1266,25 @@ def _load_settings(
         perf_frequency=max(1, int(software.get("perfFrequency", 99))),
         perf_events=str(software.get("perfEvents") or _DEFAULT_PERF_EVENTS),
         min_perf_samples=max(0, int(operator.get("minPerfSamples", 5000))),
+        context_perf_enabled=bool(context_perf.get("enabled", False)),
+        context_perf_split=bool(
+            context_perf.get("splitByOperatorBoundary", False)
+        ),
+        context_perf_frequency=max(
+            1,
+            int(
+                context_perf.get(
+                    "perfFrequency", software.get("perfFrequency", 99)
+                )
+            ),
+        ),
+        fast_operator_min_samples=max(
+            0, int(context_perf.get("fastOperatorMinSamples", 5000))
+        ),
+        context_fast_operator_calls=context_fast_operator_calls,
         operator_group=str(operator.get("group") or group),
         operator_tasks=operator_tasks,
+        operator_engines=operator_engines,
         task_input_overrides=task_input_overrides,
         workload_cpu_set=workload_cpu_set,
         observer_cpu_set=observer_cpu_set,
@@ -1089,6 +1310,62 @@ def _apply_task_input_overrides(
     return documents
 
 
+def _normalize_real_task_contracts(
+    task_documents: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """Repair pinned upstream task contracts that still describe retired stubs."""
+
+    documents = copy.deepcopy(dict(task_documents))
+    pipeline_id = "pipeline_pdf_full_min"
+    raw_document = documents.get(pipeline_id)
+    if not isinstance(raw_document, Mapping):
+        return documents
+    document = copy.deepcopy(dict(raw_document))
+    raw_pipeline = document.get("pipeline")
+    if not isinstance(raw_pipeline, list):
+        return documents
+    pipeline = copy.deepcopy(raw_pipeline)
+    legacy_vector = False
+    for step in pipeline:
+        if not isinstance(step, dict) or step.get("dj_ops") != "bge_vectorize_mapper":
+            continue
+        params = copy.deepcopy(step.get("params") or {})
+        legacy_vector = int(params.get("dim") or 0) == 16 and not params.get(
+            "emit_vector"
+        )
+        if legacy_vector:
+            params.update(
+                {
+                    "dim": 384,
+                    "emit_vector": True,
+                    "model_name": "all-MiniLM-L6-v2",
+                }
+            )
+            step["params"] = params
+        break
+    if not legacy_vector:
+        return documents
+    for step in pipeline:
+        if not isinstance(step, dict) or step.get("dj_ops") != "write_lance":
+            continue
+        params = copy.deepcopy(step.get("params") or {})
+        params.update({"field": "embedding", "vector_dim": 384})
+        step["params"] = params
+    document["pipeline"] = pipeline
+    engine_overrides = copy.deepcopy(document.get("engine_overrides") or {})
+    engine_overrides["into_partitions"] = 4
+    document["engine_overrides"] = engine_overrides
+    document["description"] = (
+        "PDF full/min real CPU path: pdfplumber parse/table, Tesseract OCR, "
+        "MiniLM embedding, and Lance sink."
+    )
+    expected = copy.deepcopy(document.get("expected") or {})
+    expected["notes"] = "Real PDF parse/OCR/table and 384-dimensional MiniLM embedding."
+    document["expected"] = expected
+    documents[pipeline_id] = document
+    return documents
+
+
 def _stable_run_id(
     run_dir: Path,
     platform: str,
@@ -1104,6 +1381,7 @@ def _stable_run_id(
             settings.group,
             settings.operator_group or settings.group,
             ",".join(settings.operator_tasks),
+            ",".join(settings.operator_engines),
             json.dumps(
                 settings.task_input_overrides or {},
                 ensure_ascii=False,
@@ -1113,6 +1391,16 @@ def _stable_run_id(
             settings.profile,
             settings.workload_cpu_set,
             settings.observer_cpu_set,
+            str(settings.context_perf_enabled),
+            str(settings.context_perf_split),
+            str(settings.context_perf_frequency),
+            str(settings.fast_operator_min_samples),
+            json.dumps(
+                settings.context_fast_operator_calls or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             environment_fingerprint_sha256,
         )
     )
@@ -1447,8 +1735,289 @@ def _write_and_push_full_task_overlays(
             overlay,
             uploads,
         )
+    if settings.context_perf_enabled:
+        uploads.extend(
+            _context_perf_support_uploads(
+                plan=plan,
+                platform_dir=platform_dir,
+                remote_dir=remote_dir,
+            ).values()
+        )
     _push_generated_files_batch(executor, uploads)
     return paths
+
+
+def _context_perf_support_uploads(
+    *,
+    plan: Mapping[str, Any],
+    platform_dir: Path,
+    remote_dir: str,
+) -> dict[str, tuple[Path, str]]:
+    del plan  # the canonical plan has already been persisted by preparation
+    adapter_dir = Path(__file__).parent
+    return {
+        "plan": (
+            platform_dir / "operators" / "operator-plan.json",
+            f"{remote_dir}/operator-plan.json",
+        ),
+        "splitter": (
+            adapter_dir / "context_perf_split.py",
+            f"{remote_dir}/context_perf_split.py",
+        ),
+        "symbolizer": (
+            adapter_dir / "perf_symbol_bundle.py",
+            f"{remote_dir}/perf_symbol_bundle.py",
+        ),
+        "symbol_env": (
+            adapter_dir / "perf_symbol_env.sh",
+            f"{remote_dir}/perf_symbol_env.sh",
+        ),
+        "microprofile": (
+            adapter_dir / "frozen_microprofile.py",
+            f"{remote_dir}/frozen_microprofile.py",
+        ),
+    }
+
+
+def _push_context_perf_support(
+    *,
+    executor: Any,
+    plan: Mapping[str, Any],
+    platform_dir: Path,
+    settings: VolcAcquisitionSettings,
+) -> dict[str, str]:
+    remote_dir = (
+        f"{settings.host_data_root}/operator-cache/pyframework/"
+        f"{plan['runId']}/overlays"
+    )
+    mkdir = executor.run(f"mkdir -p {shlex.quote(remote_dir)}", timeout=30)
+    if mkdir.returncode != 0:
+        raise StepError(f"failed to create Host overlay directory: {remote_dir}")
+    entries = _context_perf_support_uploads(
+        plan=plan,
+        platform_dir=platform_dir,
+        remote_dir=remote_dir,
+    )
+    _push_generated_files_batch(executor, list(entries.values()))
+    return {name: remote for name, (_, remote) in entries.items()}
+
+
+def _context_clock_sync_path(
+    remote_root: str, pipeline_id: str, engine: str
+) -> str:
+    case = f"pipeline_context__{_slug(pipeline_id)}__{_slug(engine)}"
+    return f"{remote_root}/pipeline_context/clock-sync-{_slug(case)}.json"
+
+
+def _context_perf_split_command(
+    *,
+    settings: VolcAcquisitionSettings,
+    remote_root: str,
+    plan_path: str,
+    splitter_path: str,
+    symbolizer_path: str,
+    pipeline_id: str,
+    engine: str,
+) -> str:
+    python = _python_for(settings, engine)
+    context_root = f"{remote_root}/pipeline_context"
+    output_root = f"{remote_root}/operator_case_perf"
+    command = " ".join(
+        (
+            shlex.quote(python),
+            shlex.quote(splitter_path),
+            "--context-root",
+            shlex.quote(context_root),
+            "--output-root",
+            shlex.quote(output_root),
+            "--plan",
+            shlex.quote(plan_path),
+            "--clock-sync",
+            shlex.quote(_context_clock_sync_path(remote_root, pipeline_id, engine)),
+            "--pipeline-id",
+            shlex.quote(pipeline_id),
+            "--engine",
+            shlex.quote(engine),
+            "--python",
+            shlex.quote(python),
+            "--symbolizer",
+            shlex.quote(symbolizer_path),
+            "--real-perf",
+            "/usr/bin/perf",
+            "--buildid-dir",
+            shlex.quote(f"{context_root}/_symbol-cache/buildid"),
+        )
+    )
+    return _docker_shell(
+        settings.container,
+        {"PYFRAMEWORK_SCOPE": "operator_case_perf"},
+        command,
+    )
+
+
+def _host_input_path(settings: VolcAcquisitionSettings, value: str) -> str:
+    path = str(value or "")
+    if not path:
+        raise ValueError("frozen context perf input path is empty")
+    return path if path.startswith("/") else f"{settings.host_data_root}/{path}"
+
+
+def _run_context_fast_operator_profiles(
+    *,
+    executor: Any,
+    settings: VolcAcquisitionSettings,
+    remote_root: str,
+    plan: Mapping[str, Any],
+    task: Mapping[str, Any],
+    support: Mapping[str, str],
+) -> None:
+    calls_by_operator = settings.context_fast_operator_calls or {}
+    if not calls_by_operator:
+        return
+    pipeline_id = str(task["pipelineId"])
+    input_spec = (settings.task_input_overrides or {}).get(pipeline_id) or {}
+    source_rows = max(1, int(input_spec.get("rows") or 1))
+    manifest = _host_input_path(
+        settings,
+        str(input_spec.get("jsonl_mirror") or input_spec.get("manifest_path") or ""),
+    )
+    work_root = (
+        f"{settings.host_data_root}/operator-cache/pyframework/"
+        f"{plan['runId']}/frozen-profile"
+    )
+    table_texts = f"{work_root}/{_slug(pipeline_id)}-table-texts.json"
+    table_summary = f"{work_root}/{_slug(pipeline_id)}-table-summary.json"
+    prepare = " ".join(
+        (
+            "mkdir -p",
+            shlex.quote(work_root),
+            "&&",
+            shlex.quote(settings.daft_python),
+            shlex.quote(support["microprofile"]),
+            "--operator",
+            "pdf_table_extract_mapper",
+            "--manifest",
+            shlex.quote(manifest),
+            "--limit",
+            str(source_rows),
+            "--total-calls",
+            str(source_rows),
+            "--output-json",
+            shlex.quote(table_texts),
+            "--summary-json",
+            shlex.quote(table_summary),
+        )
+    )
+    _run_checked(
+        executor,
+        _docker_shell(
+            settings.container,
+            {"PYFRAMEWORK_SCOPE": "operator_case_perf"},
+            f"cd {_TARGET_ROOT} && {prepare}",
+        ),
+        scope="operator_case_perf",
+        timeout=settings.timeout,
+    )
+    operators = {
+        str(item.get("operatorId") or ""): item
+        for item in task.get("operators") or []
+        if isinstance(item, Mapping)
+    }
+    for operator_id, total_calls in calls_by_operator.items():
+        operator = operators.get(operator_id)
+        if not isinstance(operator, Mapping):
+            raise ValueError(
+                f"fast context perf operator not found in {pipeline_id}: {operator_id}"
+            )
+        case_hash = hashlib.sha256(
+            str(operator["operatorCaseId"]).encode("utf-8")
+        ).hexdigest()[:12]
+        for engine_value in operator.get("engines") or task.get("engines") or []:
+            engine = str(engine_value)
+            case = f"operator_case_perf__{case_hash}__context_fast_001"
+            command = _context_fast_profile_command(
+                settings=settings,
+                remote_root=remote_root,
+                support=support,
+                engine=engine,
+                case=case,
+                operator_id=operator_id,
+                input_json=table_texts,
+                source_rows=source_rows,
+                total_calls=int(total_calls),
+                summary_json=f"{work_root}/{_slug(operator_id)}-summary.json",
+            )
+
+            def run_fast_case() -> bool:
+                _run_checked(
+                    executor,
+                    command,
+                    scope="operator_case_perf",
+                    timeout=settings.timeout,
+                )
+                return True
+
+            _run_with_profile_cpu_envelope(
+                executor=executor,
+                settings=settings,
+                action=run_fast_case,
+            )
+
+
+def _context_fast_profile_command(
+    *,
+    settings: VolcAcquisitionSettings,
+    remote_root: str,
+    support: Mapping[str, str],
+    engine: str,
+    case: str,
+    operator_id: str,
+    input_json: str,
+    source_rows: int,
+    total_calls: int,
+    summary_json: str,
+) -> str:
+    python = _python_for(settings, engine)
+    output_root = f"{remote_root}/operator_case_perf"
+    raw = " ".join(
+        (
+            shlex.quote(python),
+            shlex.quote(support["microprofile"]),
+            "--operator",
+            shlex.quote(operator_id),
+            "--input-json",
+            shlex.quote(input_json),
+            "--limit",
+            str(source_rows),
+            "--total-calls",
+            str(total_calls),
+            "--summary-json",
+            shlex.quote(summary_json),
+        )
+    )
+    env = {
+        "ENGINE": engine,
+        "PY": python,
+        "CASE": case,
+        "OUT_ROOT": output_root,
+        "MODE": "perfrecord",
+        "PERF_FREQ": settings.context_perf_frequency,
+        "PERF_EVENTS": settings.perf_events,
+        "PERF_LOCK_PROFILE": "attribution",
+        "PYFRAMEWORK_SCOPE": "operator_case_perf",
+        "BASH_ENV": support["symbol_env"],
+        "PYFRAMEWORK_REAL_PERF": "/usr/bin/perf",
+        "PYFRAMEWORK_PERF_SYMBOL_PYTHON": python,
+        "PYFRAMEWORK_PERF_SYMBOL_HELPER": support["symbolizer"],
+        "PYFRAMEWORK_PERF_SYMBOL_CACHE": f"{output_root}/_symbol-cache",
+        "PYFRAMEWORK_PERF_RECORD_EXTRA": "--buildid-all,--buildid-mmap",
+        "PYFRAMEWORK_PERF_MAP_POLL_INTERVAL": "0.005",
+    }
+    return _docker_shell(
+        settings.container,
+        env,
+        f"cd {_TARGET_ROOT} && bash scripts/capture/bench_capture.sh -- {raw}",
+    )
 
 
 def _write_and_push_overlays(
@@ -1475,14 +2044,28 @@ def _write_and_push_overlays(
     for task in plan["tasks"]:
         pipeline_id = str(task["pipelineId"])
         document = task_documents[pipeline_id]
-        for snapshot in task["snapshots"]:
+        previous_snapshot: Mapping[str, Any] | None = None
+        for snapshot in sorted(
+            task["snapshots"], key=lambda item: int(item["afterOrder"])
+        ):
             order = int(snapshot["afterOrder"])
             snapshot_dir = (
                 f"{settings.host_data_root}/operator-cache/{snapshot['snapshotId']}"
             )
+            start_order = 0
+            input_spec: Mapping[str, Any] | None = None
+            if previous_snapshot is not None:
+                start_order = int(previous_snapshot["afterOrder"]) + 1
+                input_spec = _snapshot_input_spec(
+                    settings.host_data_root,
+                    str(previous_snapshot["snapshotId"]),
+                    document,
+                )
             overlay = render_snapshot_task(
                 document,
                 through_order=order,
+                start_order=start_order,
+                input_spec=input_spec,
                 output_uri=f"{snapshot_dir}/snapshot.lance",
             )
             paths[(pipeline_id, "snapshot", order)] = _push_overlay(
@@ -1492,6 +2075,7 @@ def _write_and_push_overlays(
                 overlay,
                 uploads,
             )
+            previous_snapshot = snapshot
         for operator in task["operators"]:
             if operator.get("isolationStatus") != "supported":
                 continue
@@ -2363,8 +2947,27 @@ raise SystemExit(17)
             "timeout --signal=TERM --kill-after=10s "
             f"{_PYSPY_PROFILE_TIMEOUT_SECONDS}s {capture}"
         )
+    clock_prefix = ""
+    if mode == "perfrecord" and scope == "pipeline_context":
+        clock_path = f"{remote_out}/clock-sync-{_slug(case)}.json"
+        clock_program = r'''import json,os,sys,time
+from pathlib import Path
+path=Path(sys.argv[1])
+path.parent.mkdir(parents=True,exist_ok=True)
+before=time.monotonic()
+epoch=time.time()
+after=time.monotonic()
+payload={"schemaVersion":1,"epochSeconds":epoch,"monotonicSeconds":(before+after)/2,"maxPairSkewSeconds":after-before}
+temporary=Path(str(path)+".partial")
+temporary.write_text(json.dumps(payload,sort_keys=True)+"\n",encoding="utf-8")
+os.replace(temporary,path)
+'''
+        clock_prefix = (
+            f"{shlex.quote(python)} -c {shlex.quote(clock_program)} "
+            f"{shlex.quote(clock_path)} && "
+        )
     shell = (
-        f"cd {_TARGET_ROOT} && {capture} -- {raw}; "
+        f"cd {_TARGET_ROOT} && {clock_prefix}{capture} -- {raw}; "
         "capture_rc=$?; "
         'if [ "$capture_rc" -ne 0 ]; then exit "$capture_rc"; fi; '
         f"{shlex.quote(python)} -c {shlex.quote(validate_program)} "
@@ -2444,7 +3047,12 @@ if source_manifest_ref:
     if not source_manifest_path.is_absolute():
         source_manifest_path=Path(os.environ.get("VOLC_DE_BENCH_ROOT",""))/source_manifest_path
     if source_manifest_path.is_file():
-        source_manifest=json.loads(source_manifest_path.read_text(encoding="utf-8"))
+        try:
+            source_manifest=json.loads(source_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            # file_manifest inputs are JSONL row streams, not dataset-level
+            # JSON authorities. They declare no Lance partition contract.
+            source_manifest={}
         source_partition=source_manifest.get("partition_spec") or {}
         source_fragments=int(source_partition.get("fragments") or 0)
 current_fragments=len(list(lance.dataset(lance_path).get_fragments()))

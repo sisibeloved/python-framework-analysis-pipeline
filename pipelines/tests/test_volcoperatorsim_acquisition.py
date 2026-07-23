@@ -16,13 +16,17 @@ from pyframework_pipeline.adapters.volcoperatorsim.adapter import VolcOperatorSi
 from pyframework_pipeline.adapters.volcoperatorsim.acquisition import (
     _apply_task_input_overrides,
     _load_settings,
+    _normalize_real_task_contracts,
     _normalize_pipeline_timing,
     _profile_cpu_envelope,
     _prepare_stage_resume,
     _read_completed_capture_cases,
+    _remote_thin_context_view_command,
     _run_with_profile_cpu_envelope,
+    _snapshot_mirror_command,
     _should_recover_remote,
     _stable_run_id,
+    _write_context_perf_skip_markers,
 )
 from pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle import (
     IDENTITY_POLICY,
@@ -225,6 +229,84 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
 
         self.assertEqual(settings.workload_cpu_set, "4-7")
         self.assertEqual(settings.observer_cpu_set, "8")
+
+    def test_settings_enable_single_pass_context_perf_explicitly(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "contextPerf": {
+                        "enabled": True,
+                        "splitByOperatorBoundary": True,
+                        "perfFrequency": 990,
+                        "fastOperatorMinSamples": 5000,
+                        "fastOperatorCalls": {
+                            "text_chunk_mapper": 10000,
+                            "bge_vectorize_mapper": 32,
+                        },
+                    }
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+
+        self.assertTrue(settings.context_perf_enabled)
+        self.assertTrue(settings.context_perf_split)
+        self.assertEqual(settings.context_perf_frequency, 990)
+        self.assertEqual(settings.fast_operator_min_samples, 5000)
+        self.assertEqual(
+            settings.context_fast_operator_calls,
+            {"text_chunk_mapper": 10000, "bge_vectorize_mapper": 32},
+        )
+
+    def test_single_pass_context_perf_marks_redundant_scopes_skipped(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "contextPerf": {
+                        "enabled": True,
+                        "splitByOperatorBoundary": True,
+                    }
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            platform_dir = Path(tmp) / "arm"
+            _write_context_perf_skip_markers(platform_dir, settings)
+            markers = {
+                scope: json.loads(
+                    (
+                        platform_dir
+                        / f"operators/raw/{scope}/SKIPPED.json"
+                    ).read_text(encoding="utf-8")
+                )
+                for scope in ("pipeline_e2e", "snapshot_build", "operator_case_e2e")
+            }
+
+        self.assertTrue(all(value["status"] == "skipped" for value in markers.values()))
+        self.assertTrue(
+            all(
+                value["measurementPolicy"] == "single_pass_context_perf"
+                for value in markers.values()
+            )
+        )
+
+    def test_thin_context_transfer_keeps_host_perf_and_skips_bulk_outputs(self) -> None:
+        command = _remote_thin_context_view_command(
+            "/bench/run/arm/pipeline_context",
+            "/bench/run/arm/transfer-views/pipeline_context-1",
+        )
+
+        self.assertIn('"perf.data"', command)
+        self.assertIn('"perf-script.txt"', command)
+        self.assertIn('"perf-report-period.txt"', command)
+        self.assertIn('"perf-report-period-resolved-full.txt"', command)
+        self.assertIn('"_symbol-cache"', command)
+        self.assertIn('"outputs"', command)
+        self.assertIn("os.link", command)
+        self.assertNotIn("shutil.rmtree", command)
 
     def test_remote_run_identity_tracks_workload_and_observer_cpu_sets(self) -> None:
         workload = {"operatorAnalysis": {}}
@@ -478,6 +560,41 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
             "fixtures/text.lance",
         )
 
+    def test_pdf_real_task_normalizes_legacy_bge_contract(self) -> None:
+        source = {
+            "pipeline_pdf_full_min": {
+                "task_id": "pipeline_pdf_full_min@v0",
+                "pipeline": [
+                    {"dj_ops": "pdf_table_extract_mapper", "category": "mapper"},
+                    {
+                        "dj_ops": "bge_vectorize_mapper",
+                        "category": "mapper",
+                        "params": {"dim": 16},
+                    },
+                    {
+                        "dj_ops": "write_lance",
+                        "category": "sink",
+                        "params": {"output_uri": "fixtures/pdf.lance", "mode": "overwrite"},
+                    },
+                ],
+            }
+        }
+
+        normalized = _normalize_real_task_contracts(source)
+        vector = normalized["pipeline_pdf_full_min"]["pipeline"][1]["params"]
+        sink = normalized["pipeline_pdf_full_min"]["pipeline"][2]["params"]
+
+        self.assertEqual(vector["dim"], 384)
+        self.assertEqual(vector["model_name"], "all-MiniLM-L6-v2")
+        self.assertTrue(vector["emit_vector"])
+        self.assertEqual(sink["field"], "embedding")
+        self.assertEqual(sink["vector_dim"], 384)
+        self.assertEqual(
+            normalized["pipeline_pdf_full_min"]["engine_overrides"]["into_partitions"],
+            4,
+        )
+        self.assertEqual(source["pipeline_pdf_full_min"]["pipeline"][1]["params"], {"dim": 16})
+
     def test_scaled_input_routes_plan_p0_and_context_through_full_overlays(self) -> None:
         executor = FakeExecutor()
         with tempfile.TemporaryDirectory() as tmp:
@@ -547,6 +664,7 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
                 "operatorAnalysis": {
                     "group": "dual_engine_candidate",
                     "tasks": ["text_corpus_minhash_dedup"],
+                    "engines": ["daft_ray"],
                 },
             },
             {
@@ -562,6 +680,7 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
             settings.operator_tasks,
             ("text_corpus_minhash_dedup",),
         )
+        self.assertEqual(settings.operator_engines, ("daft_ray",))
 
     def test_case_inventory_uses_successful_runner_json_when_wrapper_status_is_null(self) -> None:
         class LocalExecutor:
@@ -806,6 +925,39 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
         self.assertEqual(mirror_attempts, 2)
         self.assertFalse(failure_exists)
 
+    def test_snapshot_mirror_accepts_jsonl_source_manifest(self) -> None:
+        settings = _load_settings(
+            {"operatorAnalysis": {}},
+            {
+                "software": {
+                    "volcOperatorSimRevision": REVISION,
+                    "hostDataRoot": "/host/data",
+                }
+            },
+        )
+        command = _snapshot_mirror_command(
+            settings,
+            {
+                "schemaVersion": 1,
+                "snapshotId": "snapshot-1",
+                "sourceRevision": REVISION,
+                "producer": "daft_ray",
+                "parentFingerprint": "sha256:input",
+                "operatorSpecHash": "sha256:operator",
+                "builderVersion": "4",
+                "partitionPolicy": "inherit_if_declared",
+            },
+            {
+                "input": {
+                    "kind": "file_manifest",
+                    "field": "file_path",
+                    "manifest_path": "fixtures/ad/manifest.jsonl",
+                }
+            },
+        )
+
+        self.assertIn("except json.JSONDecodeError", command)
+
     def test_generated_files_prefer_atomic_ssh_write_over_scp(self) -> None:
         executor = FakeExecutor(push_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
@@ -826,6 +978,48 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
             ),
             1,
         )
+
+    def test_snapshot_overlays_extend_previous_snapshot_without_replaying_prefix(self) -> None:
+        target_inputs = _target_inputs()
+        target_inputs["taskDocuments"]["pipeline_text"]["pipeline"].append(
+            {"dj_ops": "tokenize_mapper", "category": "mapper"}
+        )
+        executor = FakeExecutor(target_inputs=target_inputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = _write_volc_project(root / "project")
+            run_dir = root / "run"
+            with patch(
+                "pyframework_pipeline.remote.build_executor", return_value=executor
+            ):
+                VolcOperatorSimAdapter().collect_operator_timing(
+                    project, run_dir, "arm"
+                )
+
+            operator_root = run_dir / "arm" / "operators"
+            plan = json.loads(
+                (operator_root / "operator-plan.json").read_text(encoding="utf-8")
+            )
+            snapshots = plan["tasks"][0]["snapshots"]
+            overlay = json.loads(
+                (
+                    operator_root
+                    / "overlays"
+                    / "pipeline_text__snapshot_001.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        parent_id = snapshots[0]["snapshotId"]
+        self.assertEqual(
+            overlay["input"]["path"],
+            f"/home/lxy/de_bench_full/operator-cache/{parent_id}/snapshot.lance",
+        )
+        self.assertEqual(
+            [step["dj_ops"] for step in overlay["pipeline"]],
+            ["text_length_filter", "write_lance"],
+        )
+        self.assertEqual(overlay["metadata"]["startOrder"], 1)
+        self.assertEqual(overlay["metadata"]["throughOrder"], 1)
 
     def test_pinned_target_input_probe_retries_transient_ssh_failure(self) -> None:
         executor = FakeExecutor()

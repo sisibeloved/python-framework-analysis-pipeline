@@ -55,8 +55,15 @@ def build_acquisition_manifest(
                     "sha256": _sha256_file(path),
                 }
             )
+        skipped_marker = scope_root / "SKIPPED.json"
+        skipped = False
+        if skipped_marker.is_file():
+            try:
+                skipped = _read_json(skipped_marker).get("status") == "skipped"
+            except (OSError, ValueError, json.JSONDecodeError):
+                skipped = False
         scopes[scope] = {
-            "status": "complete" if paths else "missing",
+            "status": "skipped" if skipped else ("complete" if paths else "missing"),
             "artifactCount": len(paths),
         }
     unsupported: list[dict[str, Any]] = []
@@ -83,7 +90,10 @@ def build_acquisition_manifest(
         "sourceRevision": str(plan.get("sourceRevision") or ""),
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": "complete"
-        if all(value["status"] == "complete" for value in scopes.values())
+        if all(
+            value["status"] in {"complete", "skipped"}
+            for value in scopes.values()
+        )
         else "partial",
         "scopes": scopes,
         "unsupportedCases": unsupported,

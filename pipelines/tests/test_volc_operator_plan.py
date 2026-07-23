@@ -57,6 +57,35 @@ def _task() -> dict:
 
 
 class OperatorPlanTest(unittest.TestCase):
+    def test_plan_can_select_one_engine_from_a_dual_engine_pipeline(self) -> None:
+        plan = build_operator_plan(
+            formal_config=_formal_config(),
+            task_documents={"pipeline_text": _task()},
+            group="core_dual_engine",
+            selected_engines=("daft_ray",),
+            run_id="run-1",
+            platform="arm",
+            source_revision=REVISION,
+        )
+
+        task = plan["tasks"][0]
+        self.assertEqual(task["engines"], ["daft_ray"])
+        self.assertTrue(
+            all(operator["engines"] == ["daft_ray"] for operator in task["operators"])
+        )
+
+    def test_plan_rejects_engine_outside_pipeline_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "selected engine"):
+            build_operator_plan(
+                formal_config=_formal_config(),
+                task_documents={"pipeline_text": _task()},
+                group="core_dual_engine",
+                selected_engines=("missing_engine",),
+                run_id="run-1",
+                platform="arm",
+                source_revision=REVISION,
+            )
+
     def test_plan_can_select_one_pipeline_from_a_larger_formal_group(self) -> None:
         formal = _formal_config()
         formal["groups"]["core_dual_engine"]["tasks"].append("pipeline_other")
@@ -340,6 +369,28 @@ class DerivedTaskTest(unittest.TestCase):
         )
         self.assertTrue(snapshot["engine_overrides"]["include_write_lance_in_elapsed"])
         self.assertEqual(snapshot["metadata"]["measurementScope"], "snapshot_build")
+
+    def test_snapshot_task_can_extend_a_parent_snapshot_without_replaying_prefix(self) -> None:
+        task = _task()
+        parent_input = {
+            "kind": "lance",
+            "path": "/home/lxy/de_bench_full/operator-cache/s0/snapshot.lance",
+            "field": "text",
+        }
+
+        snapshot = render_snapshot_task(
+            task,
+            through_order=1,
+            start_order=1,
+            input_spec=parent_input,
+            output_uri="/home/lxy/de_bench_full/operator-cache/s1/snapshot.lance",
+        )
+
+        self.assertEqual(snapshot["input"], parent_input)
+        self.assertEqual(snapshot["pipeline"][0], task["pipeline"][1])
+        self.assertEqual(snapshot["pipeline"][1]["dj_ops"], "write_lance")
+        self.assertEqual(snapshot["metadata"]["startOrder"], 1)
+        self.assertEqual(snapshot["metadata"]["throughOrder"], 1)
 
 
 if __name__ == "__main__":

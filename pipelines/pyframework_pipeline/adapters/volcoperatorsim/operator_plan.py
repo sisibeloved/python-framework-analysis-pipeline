@@ -65,6 +65,7 @@ def build_operator_plan(
     platform: str,
     source_revision: str,
     selected_pipelines: tuple[str, ...] | list[str] | None = None,
+    selected_engines: tuple[str, ...] | list[str] | None = None,
     reference_producer: str = "daft_ray",
 ) -> dict[str, Any]:
     """Expand one formal group into deterministic operator and snapshot cases."""
@@ -100,7 +101,28 @@ def build_operator_plan(
             raise ValueError(f"task has no executable operators: {pipeline_id}")
 
         pipeline_config = pipeline_configs.get(pipeline_id) or {}
-        engines = [str(value) for value in pipeline_config.get("engines", [])]
+        declared_engines = [
+            str(value) for value in pipeline_config.get("engines", [])
+        ]
+        engines = declared_engines
+        if selected_engines:
+            requested_engines = list(
+                dict.fromkeys(str(value) for value in selected_engines)
+            )
+            unknown_engines = [
+                value for value in requested_engines
+                if value not in declared_engines
+            ]
+            if unknown_engines:
+                raise ValueError(
+                    "selected engine is not in formal pipeline "
+                    f"{pipeline_id}: {', '.join(unknown_engines)}"
+                )
+            requested_engine_set = set(requested_engines)
+            engines = [
+                value for value in declared_engines
+                if value in requested_engine_set
+            ]
         canonical_input = copy.deepcopy(task.get("input") or {})
         modality = str(
             pipeline_config.get("modality") or canonical_input.get("modality") or ""
@@ -388,17 +410,31 @@ def render_snapshot_task(
     task_document: Mapping[str, Any],
     *,
     through_order: int,
+    start_order: int = 0,
+    input_spec: Mapping[str, Any] | None = None,
     output_uri: str,
 ) -> dict[str, Any]:
-    """Render a reference-prefix task ending in the target write_lance sink."""
+    """Render a snapshot stage ending in the target write_lance sink.
+
+    ``start_order`` and ``input_spec`` allow a later snapshot to extend the
+    immediately preceding snapshot instead of replaying the full raw prefix.
+    """
 
     task = copy.deepcopy(dict(task_document))
     body, _ = _split_trailing_sinks(task.get("pipeline") or [])
     if through_order < 0 or through_order >= len(body):
         raise ValueError(f"snapshot order out of range: {through_order}")
+    if start_order < 0 or start_order > through_order:
+        raise ValueError(
+            f"snapshot start order out of range: {start_order}..{through_order}"
+        )
+    if start_order > 0 and input_spec is None:
+        raise ValueError("input_spec is required when snapshot start_order is non-zero")
     task_spec_id = str(task.get("task_id") or "task")
     task["task_id"] = f"{task_spec_id}__snapshot_{through_order:03d}"
-    task["pipeline"] = copy.deepcopy(body[: through_order + 1]) + [
+    if input_spec is not None:
+        task["input"] = copy.deepcopy(dict(input_spec))
+    task["pipeline"] = copy.deepcopy(body[start_order : through_order + 1]) + [
         {
             "dj_ops": "write_lance",
             "category": "sink",
@@ -421,6 +457,7 @@ def render_snapshot_task(
         {
             "measurementScope": "snapshot_build",
             "sourceTaskSpecId": task_spec_id,
+            "startOrder": start_order,
             "throughOrder": through_order,
         }
     )
