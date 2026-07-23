@@ -126,11 +126,21 @@ def normalize_operator_artifacts(
         allowed_paths=allowed_paths,
     )
     records.extend(isolated_by_key.values())
+    context_by_key = {
+        (
+            hashlib.sha256(
+                record.operator_case_id.encode("utf-8")
+            ).hexdigest()[:12],
+            record.engine_id,
+        ): record
+        for record in context_records
+    }
     records.extend(
         _normalize_perf_scope_records(
             index=index,
             perf_by_key=perf_by_key,
             isolated_by_key=isolated_by_key,
+            context_by_key=context_by_key,
             run_id=run_id,
             platform=platform,
             min_perf_samples=min_perf_samples,
@@ -177,6 +187,13 @@ def normalize_operator_artifacts(
         context_records=context_records,
         isolated_by_key=isolated_by_key,
         perf_by_key=perf_by_key,
+        skipped_scopes={
+            scope
+            for scope, state in (
+                acquisition_manifest.get("scopes") or {}
+            ).items()
+            if isinstance(state, Mapping) and state.get("status") == "skipped"
+        },
     )
     _write_json(
         platform_dir / "timing" / "operator-timing-normalized.json",
@@ -225,8 +242,10 @@ def _write_operator_coverage(
     context_records: Iterable[OperatorRecord],
     isolated_by_key: Mapping[tuple[str, str], OperatorRecord],
     perf_by_key: Mapping[tuple[str, str], Mapping[str, Any]],
+    skipped_scopes: Iterable[str] = (),
 ) -> None:
     expected = set(index)
+    skipped = set(skipped_scopes)
     context_keys = {
         (
             hashlib.sha256(record.operator_case_id.encode("utf-8")).hexdigest()[:12],
@@ -253,8 +272,18 @@ def _write_operator_coverage(
 
     scopes: dict[str, dict[str, Any]] = {}
     for scope, actual in actual_by_scope.items():
-        missing = [describe(key) for key in sorted(expected - actual)]
+        scope_skipped = scope in skipped
+        missing = (
+            []
+            if scope_skipped
+            else [describe(key) for key in sorted(expected - actual)]
+        )
         scopes[scope] = {
+            "status": (
+                "skipped"
+                if scope_skipped
+                else ("complete" if not missing else "partial")
+            ),
             "actual": len(expected & actual),
             "missing": missing,
         }
@@ -264,7 +293,10 @@ def _write_operator_coverage(
             "schemaVersion": 1,
             "status": (
                 "complete"
-                if all(not value["missing"] for value in scopes.values())
+                if all(
+                    value["status"] in {"complete", "skipped"}
+                    for value in scopes.values()
+                )
                 else "partial"
             ),
             "expectedCaseCount": len(expected),
@@ -315,6 +347,16 @@ def _normalize_context_records(
         result = _read_json(result_path)
         if engine and not result.get("engine_id"):
             result["engine_id"] = engine
+        metrics = result.get("metrics") or {}
+        runtime_fingerprint = _runtime_input_fingerprint(result, metrics)
+        if runtime_fingerprint:
+            result = {
+                **result,
+                "metrics": {
+                    **dict(metrics),
+                    "input_fingerprint": runtime_fingerprint,
+                },
+            }
         samples_path = summary_path.parent / "samples.jsonl"
         samples = (
             _read_jsonl(samples_path)
@@ -779,26 +821,38 @@ def _normalize_perf_scope_records(
     unblock_perf: bool,
     representative_profile: bool,
     top_symbol_limit: int,
+    context_by_key: Mapping[tuple[str, str], OperatorRecord] | None = None,
 ) -> list[OperatorRecord]:
     records: list[OperatorRecord] = []
+    context_by_key = context_by_key or {}
     for key, perf in perf_by_key.items():
         spec = index[key]
         isolated = isolated_by_key.get(key)
+        context = context_by_key.get(key)
+        evidence = isolated or context
         sample_count = int(perf.get("sampleCount", 0))
         quality = evaluate_operator_quality(
-            timing_source="isolated_operator_timing",
-            input_parity=isolated is not None and bool(isolated.input_fingerprint),
+            timing_source=(
+                isolated.timing.timing_source
+                if isolated is not None
+                else (
+                    context.timing.timing_source
+                    if context is not None
+                    else "isolated_operator_timing"
+                )
+            ),
+            input_parity=evidence is not None and bool(evidence.input_fingerprint),
             perf_lock_passed=(
-                isolated is not None
-                and "perf_lock_failed" not in isolated.quality.flags
+                evidence is not None
+                and "perf_lock_failed" not in evidence.quality.flags
             ),
             sample_count=sample_count,
             min_perf_samples=min_perf_samples,
             unblock_perf=unblock_perf,
             representative_profile=representative_profile,
             perf_lock_warned=(
-                isolated is not None
-                and "perf_lock_warn" in isolated.quality.flags
+                evidence is not None
+                and "perf_lock_warn" in evidence.quality.flags
             ),
         )
         symbol_resolution = dict(perf.get("symbolResolution") or {})
@@ -839,14 +893,34 @@ def _normalize_perf_scope_records(
             for category, period in sorted(category_period.items())
         }
         base_resources = (
-            isolated.resources if isolated is not None else OperatorResources()
+            evidence.resources if evidence is not None else OperatorResources()
         )
         resources = replace(base_resources, sample_count=sample_count)
+        perf_lock_statuses = []
+        perf_lock_warning_codes = []
+        perf_lock_violation_codes = []
+        if evidence is not None:
+            perf_lock_statuses = list(
+                evidence.metadata.get("perfLockStatuses") or ()
+            )
+            if (
+                not perf_lock_statuses
+                and evidence.metadata.get("perfLockStatus")
+            ):
+                perf_lock_statuses = [
+                    str(evidence.metadata["perfLockStatus"])
+                ]
+            perf_lock_warning_codes = list(
+                evidence.metadata.get("perfLockWarningCodes") or ()
+            )
+            perf_lock_violation_codes = list(
+                evidence.metadata.get("perfLockViolationCodes") or ()
+            )
         records.append(
             OperatorRecord(
                 run_id=run_id,
                 platform_id=platform,
-                arch=isolated.arch if isolated is not None else "",
+                arch=evidence.arch if evidence is not None else "",
                 pipeline_id=str(spec["pipelineId"]),
                 task_spec_id=str(spec["taskSpecId"]),
                 engine_id=str(spec["engineId"]),
@@ -854,7 +928,9 @@ def _normalize_perf_scope_records(
                 operator_id=str(spec["operatorId"]),
                 order=int(spec["order"]),
                 measurement_scope="operator_case_perf",
-                input_fingerprint=(isolated.input_fingerprint if isolated else ""),
+                input_fingerprint=(
+                    evidence.input_fingerprint if evidence is not None else ""
+                ),
                 resources=resources,
                 quality=quality,
                 source_artifacts=tuple(perf.get("sourceArtifacts") or ()),
@@ -871,25 +947,9 @@ def _normalize_perf_scope_records(
                     "symbolResolution": dict(
                         symbol_resolution
                     ),
-                    "perfLockStatuses": (
-                        list(isolated.metadata.get("perfLockStatuses") or ())
-                        if isolated is not None
-                        else []
-                    ),
-                    "perfLockWarningCodes": (
-                        list(
-                            isolated.metadata.get("perfLockWarningCodes") or ()
-                        )
-                        if isolated is not None
-                        else []
-                    ),
-                    "perfLockViolationCodes": (
-                        list(
-                            isolated.metadata.get("perfLockViolationCodes") or ()
-                        )
-                        if isolated is not None
-                        else []
-                    ),
+                    "perfLockStatuses": perf_lock_statuses,
+                    "perfLockWarningCodes": perf_lock_warning_codes,
+                    "perfLockViolationCodes": perf_lock_violation_codes,
                 },
             )
         )

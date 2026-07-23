@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pyframework_pipeline.adapters.volcoperatorsim.operator_report import (
+    _measurement_policy_note,
     build_operator_report_html,
     build_operator_report_markdown,
     write_operator_reports,
@@ -67,6 +68,36 @@ class VolcOperatorReportTest(unittest.TestCase):
 
         self.assertIn("诊断分析", html)
         self.assertNotIn('class="badge formal">正式结论', html)
+
+    def test_skipped_isolated_scope_allows_single_pass_formal_report(self) -> None:
+        with TemporaryDirectory() as tmp:
+            platform_dir = Path(tmp)
+            coverage = platform_dir / "operators/operator-coverage.json"
+            coverage.parent.mkdir(parents=True)
+            coverage.write_text(
+                '{"status":"complete","scopes":{'
+                '"pipeline_context":{"status":"complete","missing":[]},'
+                '"operator_case_e2e":{"status":"skipped","missing":[]},'
+                '"operator_case_perf":{"status":"complete","missing":[]}}}',
+                encoding="utf-8",
+            )
+            records = tuple(
+                record
+                for record in _operator_records(context_ns=200_000_000)
+                if record.measurement_scope != "operator_case_e2e"
+            )
+
+            write_operator_reports(
+                platform_dir,
+                records=records,
+                allowed_paths=set(),
+            )
+            html = (
+                platform_dir / "operators/reports/pipeline_text.html"
+            ).read_text(encoding="utf-8")
+
+        self.assertIn('class="badge formal">正式结论', html)
+        self.assertNotIn("诊断分析", html)
 
     def test_report_aggregates_exact_top_five_symbols_from_full_perf_csv(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -141,6 +172,36 @@ class VolcOperatorReportTest(unittest.TestCase):
         self.assertNotIn("<script src=", html)
         self.assertNotIn("http://", html)
         self.assertNotIn("https://", html)
+
+    def test_html_discloses_bounded_frozen_profile_policy(self) -> None:
+        html = build_operator_report_html(
+            pipeline_id="pipeline_pdf",
+            platform_id="arm",
+            records=_operator_records(context_ns=200_000_000),
+            context_results={},
+            measurement_note=(
+                "E2E 使用 64 行完整 pipeline；Perf 使用冻结代表性输入和稳态窗口。"
+            ),
+        )
+
+        self.assertIn("有界冻结采集", html)
+        self.assertIn("E2E 使用 64 行完整 pipeline", html)
+
+    def test_single_pass_context_perf_policy_is_disclosed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            platform_dir = Path(tmp) / "arm"
+            marker = platform_dir / "operators/raw/operator_case_e2e/SKIPPED.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(
+                '{"status":"skipped","measurementPolicy":"single_pass_context_perf"}',
+                encoding="utf-8",
+            )
+
+            note = _measurement_policy_note(platform_dir)
+
+        self.assertIn("同一次冻结 E2E", note)
+        self.assertIn("算子边界", note)
+        self.assertIn("快速算子", note)
 
     def test_html_marks_missing_pipeline_context_as_unattributable(self) -> None:
         records = _operator_records(context_ns=None)

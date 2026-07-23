@@ -25,7 +25,13 @@ from pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle import (
 from pyframework_pipeline.adapters.volcoperatorsim.acquisition_manifest import (
     build_acquisition_manifest,
 )
-from pyframework_pipeline.contracts.operator import OperatorDataset
+from pyframework_pipeline.contracts.operator import (
+    OperatorDataset,
+    OperatorQuality,
+    OperatorRecord,
+    OperatorResources,
+    OperatorTiming,
+)
 
 
 class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
@@ -71,6 +77,83 @@ class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
         self.assertIn("symbol_resolution_incomplete", quality.flags)
         self.assertNotIn("symbol_identity_policy_legacy", quality.flags)
         self.assertFalse(quality.formal_conclusion_allowed)
+
+    def test_single_pass_perf_inherits_context_input_and_perf_lock_evidence(
+        self,
+    ) -> None:
+        key = ("abc123def456", "daft_ray")
+        context = OperatorRecord(
+            run_id="run",
+            platform_id="arm",
+            arch="aarch64",
+            pipeline_id="pipeline",
+            task_spec_id="pipeline@v0",
+            engine_id="daft_ray",
+            operator_case_id="case",
+            operator_id="op",
+            order=0,
+            measurement_scope="pipeline_context",
+            input_fingerprint="sha256:input",
+            timing=OperatorTiming(timing_source="daft_collect_boundary"),
+            resources=OperatorResources(
+                window_cpu_time_ns_estimate=500_000_000,
+                sample_count=10,
+            ),
+            quality=OperatorQuality(
+                grade="A",
+                flags=("perf_lock_warn",),
+                formal_conclusion_allowed=True,
+            ),
+            metadata={
+                "perfLockStatus": "warn",
+                "perfLockWarningCodes": ["swap_present"],
+                "perfLockViolationCodes": [],
+            },
+        )
+
+        records = _normalize_perf_scope_records(
+            index={
+                key: {
+                    "taskSpecId": "pipeline@v0",
+                    "operatorCaseId": "case",
+                    "operatorId": "op",
+                    "order": 0,
+                    "pipelineId": "pipeline",
+                    "engineId": "daft_ray",
+                }
+            },
+            perf_by_key={
+                key: {
+                    "sampleCount": 10_000,
+                    "totalPeriod": 10_000,
+                    "rows": [],
+                    "symbolResolution": {
+                        "status": "complete",
+                        "identityPolicy": IDENTITY_POLICY,
+                    },
+                }
+            },
+            isolated_by_key={},
+            context_by_key={key: context},
+            run_id="run",
+            platform="arm",
+            min_perf_samples=5_000,
+            unblock_perf=True,
+            representative_profile=True,
+            top_symbol_limit=5,
+        )
+
+        self.assertEqual(len(records), 1)
+        perf = records[0]
+        self.assertEqual(perf.arch, "aarch64")
+        self.assertEqual(perf.input_fingerprint, "sha256:input")
+        self.assertEqual(perf.quality.grade, "A")
+        self.assertEqual(perf.quality.flags, ("perf_lock_warn",))
+        self.assertTrue(perf.quality.formal_conclusion_allowed)
+        self.assertEqual(perf.metadata["perfLockStatuses"], ["warn"])
+        self.assertEqual(
+            perf.metadata["perfLockWarningCodes"], ["swap_present"]
+        )
 
     def test_perf_normalization_prefers_resolved_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,6 +289,11 @@ class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
             result["task_spec"] = {
                 "metadata": {"sourceTaskSpecId": "pipeline_text@v0"}
             }
+            result["metrics"].pop("input_fingerprint")
+            result["perf_lock"]["input_fingerprint"] = {
+                "task_json_sha256": "runtime-task",
+                "path": "/host/frozen/input.lance",
+            }
             (runner / "result.json").write_text(
                 json.dumps(result), encoding="utf-8"
             )
@@ -235,6 +323,11 @@ class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
         ]
         self.assertEqual(len(context), 1)
         self.assertEqual(context[0].timing.pipeline_context_ns, 200_000_000)
+        self.assertEqual(
+            context[0].input_fingerprint,
+            '{"path":"/host/frozen/input.lance",'
+            '"task_json_sha256":"runtime-task"}',
+        )
         self.assertEqual(coverage["scopes"]["pipeline_context"]["actual"], 1)
 
     def test_runtime_fingerprint_falls_back_to_executed_task_input(self) -> None:
@@ -266,6 +359,52 @@ class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
             _runtime_input_fingerprint(target, target["metrics"]),
             '{"path":"/host/frozen/input.lance",'
             '"task_json_sha256":"runtime-task"}',
+        )
+
+    def test_skipped_isolated_scope_is_terminal_for_operator_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            platform_dir = Path(tmp) / "arm"
+            case_id = "pipeline_text@v0::000::clean_html_mapper::44136fa355b3"
+            case_hash = hashlib.sha256(case_id.encode()).hexdigest()[:12]
+            _write_plan(platform_dir, case_id)
+            _write_context_artifact(platform_dir)
+            _write_perf_artifact(platform_dir, case_hash)
+            for scope in ("pipeline_e2e", "operator_case_e2e"):
+                marker = platform_dir / f"operators/raw/{scope}/SKIPPED.json"
+                marker.parent.mkdir(parents=True)
+                marker.write_text(
+                    json.dumps(
+                        {
+                            "status": "skipped",
+                            "measurementPolicy": "single_pass_context_perf",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            snapshot = (
+                platform_dir / "operators/raw/snapshot_build/evidence.json"
+            )
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("{}", encoding="utf-8")
+            build_acquisition_manifest(platform_dir, platform="arm")
+
+            normalize_operator_artifacts(platform_dir, platform="arm")
+            coverage = json.loads(
+                (platform_dir / "operators/operator-coverage.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(coverage["status"], "complete")
+        self.assertEqual(
+            coverage["scopes"]["operator_case_e2e"],
+            {"status": "skipped", "actual": 0, "missing": []},
+        )
+        self.assertEqual(
+            coverage["scopes"]["pipeline_context"]["status"], "complete"
+        )
+        self.assertEqual(
+            coverage["scopes"]["operator_case_perf"]["status"], "complete"
         )
 
     def test_readable_report_aggregates_duplicate_hot_symbols(self) -> None:
@@ -470,9 +609,21 @@ class VolcOperatorArtifactNormalizerTest(unittest.TestCase):
         self.assertEqual(
             coverage["scopes"],
             {
-                "operator_case_e2e": {"actual": 1, "missing": []},
-                "operator_case_perf": {"actual": 1, "missing": []},
-                "pipeline_context": {"actual": 1, "missing": []},
+                "operator_case_e2e": {
+                    "status": "complete",
+                    "actual": 1,
+                    "missing": [],
+                },
+                "operator_case_perf": {
+                    "status": "complete",
+                    "actual": 1,
+                    "missing": [],
+                },
+                "pipeline_context": {
+                    "status": "complete",
+                    "actual": 1,
+                    "missing": [],
+                },
             },
         )
         self.assertIn("# pipeline_text · ARM 逐算子报告", readable_report)

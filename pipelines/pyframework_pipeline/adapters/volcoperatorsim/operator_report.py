@@ -19,15 +19,31 @@ _FORMAL_SCOPES = frozenset(
 )
 
 
-def _records_have_complete_scopes(records: Iterable[OperatorRecord]) -> bool:
+def _records_have_complete_scopes(
+    records: Iterable[OperatorRecord],
+    required_scopes: frozenset[str] = _FORMAL_SCOPES,
+) -> bool:
     scopes_by_case: dict[tuple[str, str], set[str]] = {}
     for record in records:
         scopes_by_case.setdefault(
             (record.engine_id, record.operator_case_id), set()
         ).add(record.measurement_scope)
     return bool(scopes_by_case) and all(
-        _FORMAL_SCOPES.issubset(scopes)
+        required_scopes.issubset(scopes)
         for scopes in scopes_by_case.values()
+    )
+
+
+def _skipped_coverage_scopes(platform_dir: Path) -> frozenset[str]:
+    path = platform_dir / "operators" / "operator-coverage.json"
+    try:
+        coverage = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    return frozenset(
+        scope
+        for scope, state in (coverage.get("scopes") or {}).items()
+        if isinstance(state, Mapping) and state.get("status") == "skipped"
     )
 
 
@@ -74,6 +90,8 @@ def write_operator_reports(
         records=record_rows,
         allowed_paths=allowed_paths,
     )
+    required_scopes = _FORMAL_SCOPES - _skipped_coverage_scopes(platform_dir)
+    measurement_note = _measurement_policy_note(platform_dir)
     reports_dir = platform_dir / "operators" / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     output_paths: list[Path] = []
@@ -94,6 +112,7 @@ def write_operator_reports(
                 records=pipeline_records,
                 context_results=pipeline_context,
                 coverage_complete=coverage_complete,
+                required_scopes=required_scopes,
             ),
             encoding="utf-8",
         )
@@ -106,6 +125,8 @@ def write_operator_reports(
                 records=pipeline_records,
                 context_results=pipeline_context,
                 coverage_complete=coverage_complete,
+                required_scopes=required_scopes,
+                measurement_note=measurement_note,
             ),
             encoding="utf-8",
         )
@@ -136,6 +157,31 @@ def write_operator_reports(
         encoding="utf-8",
     )
     return (index_html_path, index_path, *output_paths)
+
+
+def _measurement_policy_note(platform_dir: Path) -> str:
+    marker = (
+        platform_dir
+        / "operators/raw/operator_case_e2e/SKIPPED.json"
+    )
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    policy = payload.get("measurementPolicy")
+    if policy == "single_pass_context_perf":
+        return (
+            "E2E 与重算子 Perf 来自同一次冻结 E2E；Perf 按 runner 的精确算子边界"
+            "切分。仅对样本不足的快速算子使用同一冻结输入派生文本做短补采，"
+            "未重复执行 OCR，也未执行 isolated wall-time 轮次。"
+        )
+    if policy == "bounded_representative_profile":
+        return (
+            "E2E 与算子 wall time 使用完整冻结 pipeline 的 per_op 边界；"
+            "Perf 使用冻结代表性输入或同一冻结任务的稳态采样窗口。"
+            "未执行重复的 isolated wall-time 轮次。"
+        )
+    return ""
 
 
 def render_operator_reports(platform_dir: Path) -> Path:
@@ -213,6 +259,7 @@ def build_operator_report_markdown(
     records: Iterable[OperatorRecord],
     context_results: Mapping[str, Mapping[str, Any]],
     coverage_complete: bool = True,
+    required_scopes: frozenset[str] = _FORMAL_SCOPES,
 ) -> str:
     """Render a readable timing and sampled-CPU report for one pipeline."""
 
@@ -223,7 +270,7 @@ def build_operator_report_markdown(
     )
     formal_allowed = (
         coverage_complete
-        and _records_have_complete_scopes(rows)
+        and _records_have_complete_scopes(rows, required_scopes)
         and all(record.quality.formal_conclusion_allowed for record in rows)
     )
     lines = [
@@ -411,6 +458,8 @@ def build_operator_report_html(
     records: Iterable[OperatorRecord],
     context_results: Mapping[str, Mapping[str, Any]],
     coverage_complete: bool = True,
+    required_scopes: frozenset[str] = _FORMAL_SCOPES,
+    measurement_note: str = "",
 ) -> str:
     """Render a self-contained visual report for one pipeline.
 
@@ -427,7 +476,7 @@ def build_operator_report_html(
     )
     formal_allowed = (
         coverage_complete
-        and _records_have_complete_scopes(rows)
+        and _records_have_complete_scopes(rows, required_scopes)
         and all(record.quality.formal_conclusion_allowed for record in rows)
     )
     engine_sections = "".join(
@@ -440,6 +489,7 @@ def build_operator_report_html(
     )
     purpose = "正式结论" if formal_allowed else "诊断分析"
     purpose_class = "formal" if formal_allowed else "diagnostic"
+    perf_scope_label = "算子内" if measurement_note else "隔离算子"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -519,7 +569,8 @@ def build_operator_report_html(
     <p class="muted">直接回答三个问题：每个算子运行多久、占端到端多少、算子内部 CPU 时间花在哪里。</p>
   </header>
   <div class="notice"><strong>口径：</strong>运行时长和 E2E 占比来自完整 pipeline 的
-    <code>per_op</code> 边界；Perf 是隔离算子的 CPU period 分布，估算 CPU 时间不能与 wall time 相加。</div>
+    <code>per_op</code> 边界；Perf 是{perf_scope_label} CPU period 分布，估算 CPU 时间不能与 wall time 相加。</div>
+  {f'<div class="notice"><strong>有界冻结采集：</strong>{_html(measurement_note)}</div>' if measurement_note else ''}
   {engine_sections or '<p class="unattributed">没有可展示的逐算子记录。</p>'}
 </main></body></html>
 """
