@@ -1,0 +1,52 @@
+id: volc-operator-sim-pdf-full-min-hash64
+name: Volc Operator Sim PDF Full Min Hash64 Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: daft_only
+  profile: smoke
+  rounds: 1
+  timeout: 28800
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_pdf_full_min
+    inputOverrides:
+      pipeline_pdf_full_min:
+        kind: lance
+        field: file_path
+        path: fixtures/pdf/scale/pmc_pdf_hash64/pdfs_p4.lance
+        jsonl_mirror: fixtures/pdf/scale/pmc_pdf_hash64/manifest.jsonl
+        manifest_path: fixtures/pdf/scale/pmc_pdf_hash64/fixture-manifest.json
+        fixture_id: pmc_pdf_hash64
+        rows: 64
+        input_fingerprint: sha256:e03bdbf50b6abb6e1f2eef6208112fa8dfb0606bac7c8d57832757106f4e2aa1
+    contextTiming: true
+    # The complete 64-PDF context already provides exact operator wall-time
+    # boundaries. Repeating the 5.65-hour OCR for isolated timing/perf is not
+    # an acceptable default; perf uses the bounded frozen policy below.
+    isolatedTiming: false
+    profiling: false
+    warmup: 0
+    rounds: 1
+    boundedFrozenProfile:
+      enabled: true
+      sourceRows: 16
+      ocrWindowSeconds: 600
+      totalCalls:
+        pdf_parse_mapper: 16
+        pdf_table_extract_mapper: 16
+        text_chunk_mapper: 20000
+        bge_vectorize_mapper: 128
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

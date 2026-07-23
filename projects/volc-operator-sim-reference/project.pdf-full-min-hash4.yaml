@@ -1,0 +1,48 @@
+id: volc-operator-sim-pdf-full-min-hash4
+name: Volc Operator Sim PDF Full Min Hash4 Bounded Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: daft_only
+  profile: smoke
+  rounds: 1
+  timeout: 3600
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_pdf_full_min
+    inputOverrides:
+      pipeline_pdf_full_min:
+        kind: lance
+        field: file_path
+        path: fixtures/pdf/scale/pmc_pdf_hash4/pdfs_p4.lance
+        jsonl_mirror: fixtures/pdf/scale/pmc_pdf_hash4/manifest.jsonl
+        manifest_path: fixtures/pdf/scale/pmc_pdf_hash4/fixture-manifest.json
+        fixture_id: pmc_pdf_hash4
+        rows: 4
+        input_fingerprint: sha256:2ae67663b803198f9e6e22671ae9067b227db4e3763783d3652d8f6be4a34fa4
+    contextTiming: true
+    contextPerf:
+      enabled: true
+      splitByOperatorBoundary: true
+      perfFrequency: 990
+      fastOperatorMinSamples: 5000
+      fastOperatorCalls:
+        text_chunk_mapper: 10000
+        bge_vectorize_mapper: 32
+    isolatedTiming: false
+    profiling: true
+    warmup: 0
+    rounds: 1
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

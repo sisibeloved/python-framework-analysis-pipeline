@@ -171,6 +171,124 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
         )
 
 
+    def test_pdf_hash64_project_allows_real_ocr_stage_duration(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.pdf-full-min-hash64.yaml"
+        )
+        payload = load_project_config(project)
+        frozen = payload["workload"]["operatorAnalysis"]["inputOverrides"][
+            "pipeline_pdf_full_min"
+        ]
+        analysis = payload["workload"]["operatorAnalysis"]
+
+        self.assertEqual(payload["workload"]["timeout"], 28800)
+        self.assertEqual(frozen["rows"], 64)
+        self.assertFalse(analysis["isolatedTiming"])
+        self.assertFalse(analysis["profiling"])
+        self.assertEqual(
+            analysis["boundedFrozenProfile"]["ocrWindowSeconds"], 600
+        )
+        self.assertEqual(
+            analysis["boundedFrozenProfile"]["sourceRows"], 16
+        )
+
+    def test_pdf_hash4_project_freezes_e2e_and_reuses_context_perf(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.pdf-full-min-hash4.yaml"
+        )
+        payload = load_project_config(project)
+        analysis = payload["workload"]["operatorAnalysis"]
+        frozen = analysis["inputOverrides"]["pipeline_pdf_full_min"]
+
+        self.assertEqual(frozen["rows"], 4)
+        self.assertEqual(frozen["fixture_id"], "pmc_pdf_hash4")
+        self.assertEqual(
+            frozen["input_fingerprint"],
+            "sha256:2ae67663b803198f9e6e22671ae9067b227db4e3763783d3652d8f6be4a34fa4",
+        )
+        self.assertTrue(analysis["contextPerf"]["enabled"])
+        self.assertTrue(analysis["contextPerf"]["splitByOperatorBoundary"])
+        self.assertFalse(analysis["isolatedTiming"])
+
+    def test_fineweb_200k_project_targets_bounded_single_pass_perf(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.text-fineweb-200k.yaml"
+        )
+        payload = load_project_config(project)
+        analysis = payload["workload"]["operatorAnalysis"]
+        frozen = analysis["inputOverrides"]["pipeline_text_fineweb_full_min"]
+
+        self.assertEqual(payload["workload"]["group"], "core_dual_engine")
+        self.assertEqual(analysis["group"], "core_dual_engine")
+        self.assertEqual(analysis["engines"], ["daft_ray"])
+        self.assertEqual(frozen["rows"], 200000)
+        self.assertEqual(
+            frozen["input_fingerprint"],
+            "sha256:80e9d0ce05d073f6685059c5cf4861dbfbf81936a9f2c3592b48a15eeb07fdc2",
+        )
+        self.assertTrue(analysis["contextPerf"]["splitByOperatorBoundary"])
+        self.assertEqual(analysis["contextPerf"]["perfFrequency"], 990)
+        self.assertFalse(analysis["isolatedTiming"])
+
+    def test_ad_500k_calibration_project_is_timing_only(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.ad-nuscenes-500k-calibration.yaml"
+        )
+        payload = load_project_config(project)
+        analysis = payload["workload"]["operatorAnalysis"]
+        frozen = analysis["inputOverrides"]["pipeline_ad_nuscenes_min"]
+
+        self.assertEqual(frozen["rows"], 500000)
+        self.assertEqual(
+            frozen["input_fingerprint"],
+            "sha256:c8262d7c96e0186fa6362255b36dd109d5c6103948cb24b2768aef7cfa331112",
+        )
+        self.assertTrue(analysis["contextTiming"])
+        self.assertFalse(analysis["isolatedTiming"])
+        self.assertFalse(analysis["profiling"])
+
+    def test_ad_5m_project_targets_bounded_single_pass_perf(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.ad-nuscenes-5m.yaml"
+        )
+        payload = load_project_config(project)
+        analysis = payload["workload"]["operatorAnalysis"]
+        frozen = analysis["inputOverrides"]["pipeline_ad_nuscenes_min"]
+
+        self.assertEqual(frozen["rows"], 5000000)
+        self.assertEqual(
+            frozen["input_fingerprint"],
+            "sha256:891fba38c95045eb729daf183b6463192e23ec4937ea424ee9292806cbec2500",
+        )
+        self.assertTrue(analysis["contextPerf"]["splitByOperatorBoundary"])
+        self.assertEqual(analysis["contextPerf"]["perfFrequency"], 990)
+        self.assertFalse(analysis["isolatedTiming"])
+
     def test_reference_manifest_pins_required_fasttext_model(self) -> None:
         manifest = json.loads(
             (

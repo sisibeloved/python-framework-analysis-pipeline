@@ -1,0 +1,39 @@
+id: volc-operator-sim-ad-nuscenes-500k-calibration
+name: Volc Operator Sim nuScenes CAM_FRONT 500K Timing Calibration
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: daft_only
+  profile: smoke
+  rounds: 1
+  timeout: 1800
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_ad_nuscenes_min
+    inputOverrides:
+      pipeline_ad_nuscenes_min:
+        kind: file_manifest
+        field: file_path
+        path: fixtures/ad/scale/nuscenes_cam_front_500k_calibration/manifest.jsonl
+        manifest_path: fixtures/ad/scale/nuscenes_cam_front_500k_calibration/manifest.jsonl
+        fixture_id: nuscenes_cam_front_500k_calibration
+        rows: 500000
+        input_fingerprint: sha256:c8262d7c96e0186fa6362255b36dd109d5c6103948cb24b2768aef7cfa331112
+    contextTiming: true
+    isolatedTiming: false
+    profiling: false
+    warmup: 0
+    rounds: 1
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

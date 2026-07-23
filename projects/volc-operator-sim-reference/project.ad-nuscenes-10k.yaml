@@ -1,0 +1,39 @@
+id: volc-operator-sim-ad-nuscenes-10k
+name: Volc Operator Sim nuScenes CAM_FRONT 10K Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: daft_only
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    group: daft_only
+    tasks:
+      - pipeline_ad_nuscenes_min
+    inputOverrides:
+      pipeline_ad_nuscenes_min:
+        kind: file_manifest
+        field: file_path
+        path: fixtures/ad/scale/nuscenes_cam_front_10k/manifest.jsonl
+        manifest_path: fixtures/ad/scale/nuscenes_cam_front_10k/manifest.jsonl
+        fixture_id: nuscenes_cam_front_10k
+        rows: 10000
+        input_fingerprint: sha256:73f7f53de84afff4519d2e46977939f05703d6b7c9c255566c6b072f30081ab8
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm

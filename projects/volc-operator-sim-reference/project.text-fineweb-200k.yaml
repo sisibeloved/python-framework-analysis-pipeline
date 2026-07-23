@@ -1,0 +1,47 @@
+id: volc-operator-sim-text-fineweb-200k
+name: Volc Operator Sim FineWeb Text 200K Bounded Attribution
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  group: core_dual_engine
+  profile: smoke
+  rounds: 1
+  timeout: 2400
+  operatorAnalysis:
+    enabled: true
+    group: core_dual_engine
+    tasks:
+      - pipeline_text_fineweb_full_min
+    engines:
+      - daft_ray
+    inputOverrides:
+      pipeline_text_fineweb_full_min:
+        kind: lance
+        field: text
+        path: fixtures/text/scale/fineweb_edu_200k_p4/dataset_p4.lance
+        jsonl_mirror: fixtures/text/scale/fineweb_edu_200k_p4/dataset.jsonl
+        manifest_path: fixtures/text/scale/fineweb_edu_200k_p4/fixture-manifest.json
+        fixture_id: fineweb_edu_200k_p4
+        rows: 200000
+        input_fingerprint: sha256:80e9d0ce05d073f6685059c5cf4861dbfbf81936a9f2c3592b48a15eeb07fdc2
+    contextTiming: true
+    contextPerf:
+      enabled: true
+      splitByOperatorBoundary: true
+      perfFrequency: 990
+      fastOperatorMinSamples: 5000
+    isolatedTiming: false
+    profiling: true
+    warmup: 0
+    rounds: 1
+    minPerfSamples: 5000
+    topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm
