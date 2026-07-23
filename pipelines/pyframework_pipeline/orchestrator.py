@@ -621,7 +621,10 @@ def _run_workload_deploy(
 def _framework_id_from_project(project_path: Path) -> str:
     try:
         from .config import load_environment_config
-        env_config = load_environment_config(project_path)
+        env_config = load_environment_config(
+            project_path,
+            allow_example=True,
+        )
     except FileNotFoundError:
         env_config = {}
     return str(env_config.get("framework", "") or "pyflink")

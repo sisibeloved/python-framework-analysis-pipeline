@@ -90,11 +90,19 @@ def get_run_config(project_path: Path) -> dict[str, Any]:
     return run
 
 
-def load_environment_config(project_path: Path) -> dict[str, Any]:
-    """Load environment.yaml sibling to project.yaml."""
+def load_environment_config(
+    project_path: Path,
+    *,
+    allow_example: bool = False,
+) -> dict[str, Any]:
+    """Load the project environment, optionally falling back to its example."""
     env_path = project_path.parent / "environment.yaml"
     if not env_path.exists():
-        raise FileNotFoundError(f"environment.yaml not found at {env_path}")
+        example_path = project_path.parent / "environment.yaml.example"
+        if allow_example and example_path.exists():
+            env_path = example_path
+        else:
+            raise FileNotFoundError(f"environment.yaml not found at {env_path}")
     from .environment.parser import load_environment_yaml
     return load_environment_yaml(env_path)
 
@@ -150,14 +158,15 @@ def validate_pipeline_config(
 
     env_path = project_path.parent / "environment.yaml"
     env_config: dict[str, Any] = {}
-    if not env_path.exists():
+    try:
+        env_config = load_environment_config(
+            project_path,
+            allow_example=True,
+        )
+    except FileNotFoundError:
         add("environment.yaml", f"environment.yaml not found at {env_path}")
-    else:
-        try:
-            from .environment.parser import load_environment_yaml
-            env_config = load_environment_yaml(env_path)
-        except Exception as exc:
-            add("environment.yaml", f"failed to parse environment.yaml: {exc}")
+    except Exception as exc:
+        add("environment.yaml", f"failed to parse environment.yaml: {exc}")
 
     workload = project_config.get("workload", {}) if project_config else {}
     local_dir = workload.get("localDir") if isinstance(workload, dict) else None
