@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle import (
     _select_workload_affinity,
     _symbol_lookup_keys,
     index_raw_perf_lines,
+    build_raw_sample_index,
     parse_proc_maps,
     resolve_period_report,
     record_with_symbol_bundle,
@@ -33,6 +35,57 @@ from pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle import (
 
 
 class VolcPerfSymbolBundleTest(unittest.TestCase):
+    def test_raw_sample_builder_filters_non_event_dump_lines_before_python(self) -> None:
+        class Process:
+            def __init__(self, output: str, returncode: int = 0) -> None:
+                self.stdout = io.StringIO(output)
+                self.returncode = returncode
+                self.terminated = False
+
+            def wait(self) -> int:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+        perf_process = Process("unfiltered raw dump\n")
+        filter_process = Process(
+            "1 0x20 [0x68]: PERF_RECORD_MMAP2 111/111: "
+            "[0x7000(0x1000) @ 0 <abc123>]: r-xp /tmp/lib.so\n"
+            "1 0x88 [0x40]: PERF_RECORD_SAMPLE(IP, 0x1): "
+            "111/222: 0x7123 period: 100 addr: 0\n"
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "buildid:abc123": {
+                    "buildId": "abc123",
+                    "cachePath": "objects/abc123.elf",
+                    "originalPath": "/tmp/lib.so",
+                }
+            },
+            "mappings": [],
+        }
+
+        with patch(
+            "pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle."
+            "subprocess.Popen",
+            side_effect=[perf_process, filter_process],
+        ) as popen:
+            index = build_raw_sample_index(
+                perf_data=Path("/capture/perf.data"),
+                manifest=manifest,
+            )
+
+        self.assertEqual(
+            index[(222, 0x123)],
+            {"buildid:abc123": {"period": 100, "sampleCount": 1}},
+        )
+        filter_call = popen.call_args_list[1]
+        self.assertEqual(filter_call.args[0][0:2], ("grep", "-E"))
+        self.assertIn("PERF_RECORD_", filter_call.args[0][2])
+        self.assertEqual(filter_call.kwargs["env"]["LC_ALL"], "C")
+
     def test_perf_lock_policy_reserves_the_observer_cpu_from_the_workload(self) -> None:
         target = _select_workload_affinity(
             {4, 5, 6, 7, 8}, "cpus=4-7,mems=0"
@@ -254,6 +307,68 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
         self.assertEqual(summary["mappingManifestStatus"], "incomplete")
         self.assertFalse(summary["mappingManifestComplete"])
 
+    def test_raw_sample_index_cache_is_reused_for_the_same_perf_data(self) -> None:
+        report = (
+            " 100.00%|100|1|python|  88:python|(deleted)|[.] 0x1234\n"
+        )
+        raw_index = {
+            (88, 0x1234): {
+                "buildid:abc": {"period": 100, "sampleCount": 1}
+            }
+        }
+        resolution = {
+            "status": "complete",
+            "unresolvedDeletedRows": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "perf-report-period.txt"
+            manifest = root / "perf-dso-manifest.json"
+            output = root / "perf-report-period-resolved.txt"
+            perf_data = root / "perf.data"
+            cache = root / "raw-sample-index.json"
+            source.write_text(report, encoding="utf-8")
+            perf_data.write_bytes(b"perf")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "status": "complete",
+                        "identityPolicy": IDENTITY_POLICY,
+                        "objects": {},
+                        "mappings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim."
+                    "perf_symbol_bundle.build_raw_sample_index",
+                    return_value=raw_index,
+                ) as build,
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim."
+                    "perf_symbol_bundle.resolve_period_report",
+                    return_value=("resolved\n", dict(resolution)),
+                ) as resolve,
+            ):
+                for _ in range(2):
+                    write_resolved_period_report(
+                        source=source,
+                        manifest_path=manifest,
+                        output=output,
+                        perf_data=perf_data,
+                        raw_index_cache=cache,
+                    )
+
+        build.assert_called_once()
+        self.assertEqual(
+            resolve.call_args_list[1].kwargs["raw_sample_index"],
+            raw_index,
+        )
+
     def test_perf_buildid_cache_timeout_is_a_bounded_manifest_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -412,6 +527,10 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
                 }
             },
         )
+        self.assertEqual(
+            manifest["objects"]["buildid:abc123"]["identityEvidence"],
+            "perf-build-id",
+        )
 
     def test_raw_perf_retains_mmap_identity_when_deleted_elf_is_gone(self) -> None:
         manifest = {"schemaVersion": 1, "objects": {}, "mappings": []}
@@ -448,6 +567,60 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
                 "metadataOnly": True,
                 "originalPath": "/tmp/libgone.so",
             },
+        )
+
+    def test_raw_perf_static_mapping_fallback_uses_indexed_smallest_interval(
+        self,
+    ) -> None:
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "buildid:wide": {},
+                "buildid:narrow": {},
+                "buildid:irrelevant": {},
+            },
+            "mappings": [
+                *[
+                    {
+                        "pid": 1000 + index,
+                        "tids": [1000 + index],
+                        "start": "0x1000",
+                        "end": "0x9000",
+                        "offset": "0x0",
+                        "objectId": "buildid:irrelevant",
+                    }
+                    for index in range(1000)
+                ],
+                {
+                    "pid": 111,
+                    "tids": [111, 222],
+                    "start": "0x7000",
+                    "end": "0x9000",
+                    "offset": "0x0",
+                    "objectId": "buildid:wide",
+                },
+                {
+                    "pid": 111,
+                    "tids": [111, 222],
+                    "start": "0x7100",
+                    "end": "0x7200",
+                    "offset": "0x10",
+                    "objectId": "buildid:narrow",
+                },
+            ],
+        }
+        lines = [
+            "1 0x88 [0x40]: PERF_RECORD_SAMPLE(IP, 0x1): "
+            "111/222: 0x7123 period: 100 addr: 0\n",
+            "1 0x89 [0x40]: PERF_RECORD_SAMPLE(IP, 0x1): "
+            "111/222: 0x7123 period: 50 addr: 0\n",
+        ]
+
+        index = index_raw_perf_lines(lines, manifest)
+
+        self.assertEqual(
+            index[(222, 0x33)],
+            {"buildid:narrow": {"period": 150, "sampleCount": 2}},
         )
 
     def test_raw_perf_mmap2_lazily_archives_a_stable_short_lived_binary(self) -> None:
@@ -1149,6 +1322,102 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
         self.assertEqual(summary["status"], "complete")
         self.assertEqual(
             summary["resolutions"][0]["mappingSource"], "perf-mmap2-metadata"
+        )
+
+    def test_resolve_named_row_accepts_short_absolute_addr(self) -> None:
+        report = (
+            " 100.00%|800|8|DAFTCPU-0|  79:DAFTCPU-0|(deleted)|"
+            "[.] ucs2lib_utf8_encoder|0x54cd44\n"
+            "            0xffffb021fbb4\n"
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "buildid:python": {
+                    "buildId": "python",
+                    "capturedFrom": "perf-mmap2",
+                    "identityEvidence": "perf-build-id",
+                    "metadataOnly": True,
+                    "originalPath": "/opt/python314/bin/python3.14",
+                }
+            },
+            "mappings": [],
+        }
+
+        resolved, summary = resolve_period_report(
+            report,
+            manifest,
+            bundle_root=Path("/bundle"),
+            raw_sample_index={
+                ("absolute", 79, 0x54CD44): {
+                    "buildid:python": {
+                        "period": 1600,
+                        "sampleCount": 16,
+                        "relativeIp": 0x14CD44,
+                    }
+                }
+            },
+        )
+
+        self.assertIn("python3.14", resolved)
+        self.assertIn("ucs2lib_utf8_encoder", resolved)
+        self.assertNotIn("(deleted)", resolved)
+        self.assertEqual(summary["status"], "complete")
+
+    def test_raw_absolute_mapping_overrides_conflicting_procfs_snapshot(
+        self,
+    ) -> None:
+        report = (
+            " 100.00%|800|8|DAFTCPU-0|  79:DAFTCPU-0|(deleted)|"
+            "[.] ucs2lib_utf8_encoder|0x54cd44\n"
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "buildid:libc": {
+                    "cachePath": "objects/libc.elf",
+                    "soname": "libc.so.6",
+                    "identityEvidence": "procfs-map-files",
+                },
+                "buildid:python": {
+                    "cachePath": "objects/python.elf",
+                    "soname": "python3.14",
+                    "identityEvidence": "perf-build-id",
+                },
+            },
+            "mappings": [
+                {
+                    "pid": 79,
+                    "tids": [79],
+                    "start": "0x500000",
+                    "end": "0x600000",
+                    "offset": "0x0",
+                    "objectId": "buildid:libc",
+                }
+            ],
+        }
+
+        resolved, summary = resolve_period_report(
+            report,
+            manifest,
+            bundle_root=Path("/bundle"),
+            raw_sample_index={
+                ("absolute", 79, 0x54CD44): {
+                    "buildid:python": {
+                        "period": 1600,
+                        "sampleCount": 16,
+                        "relativeIp": 0x14CD44,
+                    }
+                }
+            },
+            symbolizer=lambda _path, _address: ("wrong_snapshot_symbol", ""),
+        )
+
+        self.assertIn("python3.14", resolved)
+        self.assertNotIn("libc.so.6", resolved)
+        self.assertNotIn("wrong_snapshot_symbol", resolved)
+        self.assertEqual(
+            summary["resolutions"][0]["mappingSource"], "perf-mmap2"
         )
 
     def test_resolve_named_row_keeps_ambiguous_deleted_identity_unresolved(self) -> None:

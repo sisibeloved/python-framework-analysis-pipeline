@@ -34,7 +34,7 @@ _MAP_LINE = re.compile(
     r"(?P<device>\S+)\s+(?P<inode>\d+)\s*(?P<path>.*)$"
 )
 _REPORT_ROW = re.compile(r"^\s*[0-9]+(?:\.[0-9]+)?%?\s*\|")
-_ABSOLUTE_IP = re.compile(r"(?:---)?0x([0-9a-fA-F]{10,16})\b")
+_ABSOLUTE_IP = re.compile(r"(?:---)?0x([0-9a-fA-F]{1,16})\b")
 _BUILD_ID = re.compile(r"Build ID:\s*([0-9a-fA-F]+)")
 _SONAME = re.compile(r"\(SONAME\).*?\[([^]]+)]")
 _RAW_SAMPLE = re.compile(
@@ -63,6 +63,10 @@ _RAW_EXIT = re.compile(
     r"PERF_RECORD_EXIT\((?P<pid>\d+):(?P<tid>\d+)\):"
     r"\((?P<ppid>\d+):(?P<ptid>\d+)\)"
 )
+_RAW_EVENT_FILTER = (
+    r"PERF_RECORD_(SAMPLE|MMAP2|FORK|EXIT|COMM)"
+)
+_RAW_SAMPLE_INDEX_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -810,6 +814,83 @@ def _mapping_for_ip(
     return min(candidates, key=lambda item: _integer(item["end"]) - _integer(item["start"]))
 
 
+def _manifest_mapping_index(
+    manifest: Mapping[str, Any],
+) -> dict[
+    int,
+    tuple[
+        tuple[Mapping[str, Any], ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+]:
+    """Index captured mappings by task and start address for point lookups.
+
+    A context profile can contain hundreds of thousands of samples.  Falling
+    back to ``_mapping_for_ip`` for each sample previously rescanned every
+    mapping and rebuilt each mapping's TID set, which made symbol resolution
+    O(samples * mappings).  Keep the same "smallest containing mapping"
+    selection policy, but pre-group candidates and stop scanning once the
+    prefix maximum end proves no earlier interval can contain the IP.
+    """
+
+    grouped: dict[int, list[Mapping[str, Any]]] = {}
+    for item in manifest.get("mappings") or ():
+        if not isinstance(item, Mapping) or not item.get("objectId"):
+            continue
+        task_ids = {_integer(item.get("pid", -1))}
+        task_ids.update(_integer(value) for value in item.get("tids") or ())
+        for task_id in task_ids:
+            if task_id >= 0:
+                grouped.setdefault(task_id, []).append(item)
+
+    result = {}
+    for task_id, candidates in grouped.items():
+        ordered = tuple(
+            sorted(candidates, key=lambda item: _integer(item["start"]))
+        )
+        starts = tuple(_integer(item["start"]) for item in ordered)
+        maximum = -1
+        prefix_max_end = []
+        for item in ordered:
+            maximum = max(maximum, _integer(item["end"]))
+            prefix_max_end.append(maximum)
+        result[task_id] = (ordered, starts, tuple(prefix_max_end))
+    return result
+
+
+def _mapping_for_ip_from_index(
+    index: Mapping[
+        int,
+        tuple[
+            tuple[Mapping[str, Any], ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ],
+    ],
+    *,
+    tid: int,
+    ip: int,
+) -> Mapping[str, Any] | None:
+    entry = index.get(tid)
+    if entry is None:
+        return None
+    mappings, starts, prefix_max_end = entry
+    position = bisect_right(starts, ip) - 1
+    candidates = []
+    while position >= 0 and prefix_max_end[position] > ip:
+        item = mappings[position]
+        if ip < _integer(item["end"]):
+            candidates.append(item)
+        position -= 1
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: _integer(item["end"]) - _integer(item["start"]),
+    )
+
+
 def _mapping_object_for_raw_mmap(
     manifest: Mapping[str, Any],
     *,
@@ -904,8 +985,27 @@ def index_raw_perf_lines(
     runtime_mappings: dict[int, list[dict[str, Any]]] = {}
     process_comms: dict[int, str] = {}
     index: dict[tuple[Any, ...], dict[str, dict[str, int]]] = {}
+    captured_mapping_index = _manifest_mapping_index(manifest)
+    captured_mapping_cache: dict[
+        tuple[int, int], Mapping[str, Any] | None
+    ] = {}
+
+    def captured_mapping(tid: int, ip: int) -> Mapping[str, Any] | None:
+        key = (tid, ip)
+        if key not in captured_mapping_cache:
+            captured_mapping_cache[key] = _mapping_for_ip_from_index(
+                captured_mapping_index,
+                tid=tid,
+                ip=ip,
+            )
+        return captured_mapping_cache[key]
+
     for line in lines:
-        fork_match = _RAW_FORK.search(line)
+        fork_match = (
+            _RAW_FORK.search(line)
+            if "PERF_RECORD_FORK" in line
+            else None
+        )
         if fork_match:
             child_pid = int(fork_match.group("pid"))
             parent_pid = int(fork_match.group("ppid"))
@@ -916,7 +1016,11 @@ def index_raw_perf_lines(
             if parent_pid in process_comms:
                 process_comms[child_pid] = process_comms[parent_pid]
             continue
-        exit_match = _RAW_EXIT.search(line)
+        exit_match = (
+            _RAW_EXIT.search(line)
+            if "PERF_RECORD_EXIT" in line
+            else None
+        )
         if exit_match:
             pid = int(exit_match.group("pid"))
             tid = int(exit_match.group("tid"))
@@ -924,13 +1028,21 @@ def index_raw_perf_lines(
                 runtime_mappings.pop(pid, None)
                 process_comms.pop(pid, None)
             continue
-        comm_match = _RAW_COMM_EXEC.search(line)
+        comm_match = (
+            _RAW_COMM_EXEC.search(line)
+            if "PERF_RECORD_COMM" in line
+            else None
+        )
         if comm_match:
             process_comms[int(comm_match.group("pid"))] = comm_match.group(
                 "comm"
             ).strip()
             continue
-        mmap_match = _RAW_MMAP2.search(line)
+        mmap_match = (
+            _RAW_MMAP2.search(line)
+            if "PERF_RECORD_MMAP2" in line
+            else None
+        )
         if mmap_match:
             pid = int(mmap_match.group("pid"))
             tid = int(mmap_match.group("tid"))
@@ -967,6 +1079,15 @@ def index_raw_perf_lines(
                 candidate = f"buildid:{raw_build_id}"
                 if candidate in objects:
                     object_id = candidate
+                    candidate_item = objects[candidate]
+                    if (
+                        isinstance(candidate_item, dict)
+                        and candidate_item.get("identityEvidence")
+                        != "procfs-map-files"
+                    ):
+                        candidate_item["identityEvidence"] = "perf-build-id"
+                        candidate_item["identityPolicy"] = IDENTITY_POLICY
+                        candidate_item["perfMmapBuildId"] = raw_build_id
             if not object_id and (not deleted or build_id_match):
                 candidates = path_objects.get(normalized_path, [])
                 if raw_build_id:
@@ -1040,7 +1161,11 @@ def index_raw_perf_lines(
             active.append(mapping)
             active.sort(key=lambda item: item["start"])
             continue
-        sample_match = _RAW_SAMPLE.search(line)
+        sample_match = (
+            _RAW_SAMPLE.search(line)
+            if "PERF_RECORD_SAMPLE" in line
+            else None
+        )
         if not sample_match:
             continue
         pid = int(sample_match.group("pid"))
@@ -1050,9 +1175,9 @@ def index_raw_perf_lines(
             runtime_mappings.get(pid, ()), ip
         )
         if mapping is None:
-            mapping = _mapping_for_ip(manifest, tid=tid, ip=ip)
+            mapping = captured_mapping(tid, ip)
         if mapping is None:
-            mapping = _mapping_for_ip(manifest, tid=pid, ip=ip)
+            mapping = captured_mapping(pid, ip)
         if mapping is None:
             continue
         relative_ip = ip - _integer(mapping["start"]) + _integer(
@@ -1095,7 +1220,7 @@ def build_raw_sample_index(
     if buildid_dir is not None:
         command.extend(("--buildid-dir", str(buildid_dir)))
     command.extend(("script", "-D", "--max-stack", "0", "-i", str(perf_data)))
-    process = subprocess.Popen(
+    perf_process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -1103,14 +1228,106 @@ def build_raw_sample_index(
         encoding="utf-8",
         errors="replace",
     )
-    assert process.stdout is not None
-    index = index_raw_perf_lines(
-        process.stdout, manifest, object_loader=object_loader
+    assert perf_process.stdout is not None
+    filter_process = subprocess.Popen(
+        ("grep", "-E", _RAW_EVENT_FILTER),
+        stdin=perf_process.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "LC_ALL": "C"},
     )
-    returncode = process.wait()
-    if returncode != 0:
-        raise RuntimeError(f"perf script raw sample extraction failed: {returncode}")
+    perf_process.stdout.close()
+    assert filter_process.stdout is not None
+    try:
+        index = index_raw_perf_lines(
+            filter_process.stdout,
+            manifest,
+            object_loader=object_loader,
+        )
+    except BaseException:
+        filter_process.terminate()
+        perf_process.terminate()
+        filter_process.wait()
+        perf_process.wait()
+        raise
+    finally:
+        filter_process.stdout.close()
+    filter_returncode = filter_process.wait()
+    perf_returncode = perf_process.wait()
+    if perf_returncode != 0 or filter_returncode not in {0, 1}:
+        raise RuntimeError(
+            "perf script raw sample extraction failed: "
+            f"perf={perf_returncode} filter={filter_returncode}"
+        )
     return index
+
+
+def _raw_sample_index_cache_identity(perf_data: Path) -> dict[str, Any]:
+    stat = perf_data.stat()
+    return {
+        "path": str(perf_data.resolve()),
+        "size": stat.st_size,
+        "mtimeNs": stat.st_mtime_ns,
+    }
+
+
+def _load_raw_sample_index_cache(
+    path: Path,
+    *,
+    perf_data: Path,
+) -> dict[tuple[Any, ...], dict[str, dict[str, int]]] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        payload.get("schemaVersion")
+        != _RAW_SAMPLE_INDEX_CACHE_SCHEMA_VERSION
+        or payload.get("perfData") != _raw_sample_index_cache_identity(perf_data)
+        or not isinstance(payload.get("entries"), list)
+    ):
+        return None
+    result: dict[tuple[Any, ...], dict[str, dict[str, int]]] = {}
+    try:
+        for item in payload["entries"]:
+            key = tuple(item["key"])
+            candidates = {
+                str(object_id): {
+                    str(name): int(value)
+                    for name, value in totals.items()
+                }
+                for object_id, totals in item["candidates"].items()
+            }
+            result[key] = candidates
+    except (KeyError, TypeError, ValueError):
+        return None
+    return result
+
+
+def _write_raw_sample_index_cache(
+    path: Path,
+    *,
+    perf_data: Path,
+    index: Mapping[tuple[Any, ...], Mapping[str, Mapping[str, int]]],
+) -> None:
+    payload = {
+        "schemaVersion": _RAW_SAMPLE_INDEX_CACHE_SCHEMA_VERSION,
+        "perfData": _raw_sample_index_cache_identity(perf_data),
+        "entries": [
+            {"key": list(key), "candidates": candidates}
+            for key, candidates in index.items()
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name("." + path.name + ".partial")
+    temporary.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def _default_symbolizer(path: Path, address: int) -> tuple[str, str]:
@@ -1503,12 +1720,16 @@ def resolve_period_report(
             explicit_address = _ABSOLUTE_IP.search(parts[7])
             if explicit_address:
                 absolute_ip = int(explicit_address.group(1), 16)
-        while next_index < len(lines) and not _REPORT_ROW.match(lines[next_index]):
-            match = _ABSOLUTE_IP.search(lines[next_index])
-            if match:
-                absolute_ip = int(match.group(1), 16)
-                break
-            next_index += 1
+        if absolute_ip is None:
+            while (
+                next_index < len(lines)
+                and not _REPORT_ROW.match(lines[next_index])
+            ):
+                match = _ABSOLUTE_IP.search(lines[next_index])
+                if match:
+                    absolute_ip = int(match.group(1), 16)
+                    break
+                next_index += 1
         tid = _report_pid(parts)
         mapping = (
             _mapping_for_ip(manifest, tid=tid, ip=absolute_ip)
@@ -1526,8 +1747,7 @@ def resolve_period_report(
                 + _integer(mapping.get("offset", 0))
             )
         if (
-            not object_id
-            and tid is not None
+            tid is not None
             and absolute_ip is not None
             and raw_sample_index is not None
         ):
@@ -1553,6 +1773,9 @@ def resolve_period_report(
                 else None
             )
             if selected_absolute is not None:
+                # PERF_RECORD_MMAP2 is ordered with the sample stream and is
+                # therefore stronger evidence than a procfs snapshot that may
+                # contain a historical mapping at the same virtual address.
                 object_id = selected_absolute[0]
                 relative_ip = int(selected_absolute[1]["relativeIp"])
                 target_symbol = re.sub(r"^\[[^]]+]\s*", "", parts[6].strip())
@@ -1744,6 +1967,7 @@ def write_resolved_period_report(
     perf_data: Path | None = None,
     real_perf: str = "/usr/bin/perf",
     buildid_dir: Path | None = None,
+    raw_index_cache: Path | None = None,
 ) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     bundle_root = manifest_path.parent / str(manifest.get("bundleRoot") or ".")
@@ -1751,25 +1975,49 @@ def write_resolved_period_report(
     raw_sample_index = None
     if "(deleted)" in source_text and perf_data is not None:
         prior_object_ids = set(manifest.get("objects") or {})
-        raw_sample_index = build_raw_sample_index(
-            perf_data=perf_data,
-            manifest=manifest,
-            real_perf=real_perf,
-            buildid_dir=buildid_dir,
-            object_loader=lambda path, build_id, comm: _archive_stable_perf_object(
-                path,
-                expected_build_id=build_id,
-                bundle_root=bundle_root,
-                manifest=manifest,
-                comm=comm,
-            ),
+        prior_objects_json = json.dumps(
+            manifest.get("objects") or {},
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        if raw_index_cache is not None:
+            raw_sample_index = _load_raw_sample_index_cache(
+                raw_index_cache,
+                perf_data=perf_data,
+            )
+        if raw_sample_index is None:
+            raw_sample_index = build_raw_sample_index(
+                perf_data=perf_data,
+                manifest=manifest,
+                real_perf=real_perf,
+                buildid_dir=buildid_dir,
+                object_loader=lambda path, build_id, comm: _archive_stable_perf_object(
+                    path,
+                    expected_build_id=build_id,
+                    bundle_root=bundle_root,
+                    manifest=manifest,
+                    comm=comm,
+                ),
+            )
+            if raw_index_cache is not None:
+                _write_raw_sample_index_cache(
+                    raw_index_cache,
+                    perf_data=perf_data,
+                    index=raw_sample_index,
+                )
         new_objects = {
             object_id: item
             for object_id, item in (manifest.get("objects") or {}).items()
             if object_id not in prior_object_ids and item.get("cachePath")
         }
-        manifest_changed = set(manifest.get("objects") or {}) != prior_object_ids
+        manifest_changed = (
+            json.dumps(
+                manifest.get("objects") or {},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            != prior_objects_json
+        )
         if new_objects:
             failures = _populate_perf_buildid_cache(
                 real_perf=real_perf,
@@ -1841,6 +2089,7 @@ def _resolve_cli(args: argparse.Namespace) -> int:
             perf_data=args.perf_data,
             real_perf=args.real_perf,
             buildid_dir=args.buildid_dir,
+            raw_index_cache=args.raw_index_cache,
         )
     except UnresolvedDeletedMappings as exc:
         print(f"PYFRAMEWORK_PERF_SYMBOL_RESOLUTION=incomplete error={exc}", file=sys.stderr)
@@ -1865,6 +2114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolve.add_argument("--perf-data", type=Path)
     resolve.add_argument("--real-perf", default="/usr/bin/perf")
     resolve.add_argument("--buildid-dir", type=Path)
+    resolve.add_argument("--raw-index-cache", type=Path)
     resolve.set_defaults(handler=_resolve_cli)
     args = parser.parse_args(argv)
     if args.command == "record" and args.arguments[:1] == ["--"]:
