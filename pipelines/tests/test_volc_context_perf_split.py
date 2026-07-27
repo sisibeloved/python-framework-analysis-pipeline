@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from pyframework_pipeline.adapters.volcoperatorsim.context_perf_split import (
+    _perf_report_command,
     build_operator_windows,
     clock_offset_seconds,
     compact_period_report,
@@ -13,6 +14,22 @@ from pyframework_pipeline.adapters.volcoperatorsim.context_perf_split import (
 
 
 class VolcContextPerfSplitTest(unittest.TestCase):
+    def test_perf_report_uses_the_capture_buildid_cache(self) -> None:
+        command = _perf_report_command(
+            real_perf="/usr/bin/perf",
+            perf_data=Path("/capture/perf.data"),
+            start_seconds=1.25,
+            end_seconds=2.5,
+            buildid_dir=Path("/capture/buildid"),
+        )
+
+        self.assertEqual(
+            command[:4],
+            ["/usr/bin/perf", "--buildid-dir", "/capture/buildid", "report"],
+        )
+        self.assertIn("--time=1.250000000,2.500000000", command)
+        self.assertEqual(command[-2:], ["-i", "/capture/perf.data"])
+
     def test_compact_period_report_sums_same_symbol_without_losing_samples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
