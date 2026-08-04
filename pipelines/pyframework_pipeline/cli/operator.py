@@ -64,11 +64,19 @@ def handle(args) -> int:
                     )
             else:
                 return 2
-        print(json.dumps({"status": "completed", "output": str(output)}))
+        print(
+            json.dumps(
+                {"status": "completed", "output": str(output)},
+                ensure_ascii=False,
+            )
+        )
         return 0
     except Exception as exc:
         print(
-            json.dumps({"status": "failed", "error": str(exc)}),
+            json.dumps(
+                {"status": "failed", "error": str(exc)},
+                ensure_ascii=False,
+            ),
             file=sys.stderr,
         )
         return 1
