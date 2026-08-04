@@ -20,12 +20,13 @@ software:
   udfBenchmarkingRepo: https://gitcode.com/stone31415/UDF_Benchmarking.git
   udfBenchmarkingRevision: 29159573d08998a5aee238034d05416510a69d02
   udfBenchmarkingImages:
-    arm: udf-benchmarking-bench:py311-arm
-    x86: udf-benchmarking-bench:py311-x86
+    arm: udf-benchmarking-bench:py311-np243-arm
+    x86: udf-benchmarking-bench:py311-np243-x86
   udfBenchmarkingContainer: udf-benchmarking-bench
   benchmarkName: MockVideoE2EUDF
   benchmarkConfigFile: config.yaml
   benchmarkTimeout: 7200
+  numpyVersion: 2.4.3
   aptMirror: https://mirrors.tuna.tsinghua.edu.cn/debian
   aptSecurityMirror: https://mirrors.tuna.tsinghua.edu.cn/debian-security
   pipIndexUrl: https://pypi.tuna.tsinghua.edu.cn/simple

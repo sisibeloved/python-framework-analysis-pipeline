@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import atexit
 from pathlib import Path
@@ -333,6 +335,64 @@ class EnvironmentValidateTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["issueCount"], 0)
+
+    def test_validate_accepts_framework_fingerprint_plan_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan = self._generate_plan(tmp_dir)
+            plan["steps"].append(
+                {
+                    "id": "record-environment-fingerprint",
+                    "kind": "framework-fingerprint",
+                    "hostRef": "arm-host",
+                    "command": "true",
+                    "required": True,
+                    "mutatesHost": True,
+                    "requiresPrivilege": False,
+                    "requiresApproval": False,
+                    "rollbackHint": "No rollback required.",
+                }
+            )
+            (tmp_dir / "environment-plan.json").write_text(
+                json.dumps(plan, indent=2), encoding="utf-8"
+            )
+            record = {
+                "schemaVersion": 1,
+                "projectId": plan["projectId"],
+                "platform": plan["platform"],
+                "planHash": plan["planHash"],
+                "startedAt": "2026-04-15T10:00:00Z",
+                "finishedAt": "2026-04-15T10:12:00Z",
+                "mode": "full-auto",
+                "provenance": {"recordedBy": "auto"},
+                "steps": [
+                    {
+                        "id": step["id"],
+                        "status": "passed",
+                        **({"note": "executed"} if step["mutatesHost"] else {}),
+                    }
+                    for step in plan["steps"]
+                ],
+            }
+            (tmp_dir / "environment-record.json").write_text(
+                json.dumps(record, indent=2), encoding="utf-8"
+            )
+            readiness = {
+                "schemaVersion": 1,
+                "projectId": plan["projectId"],
+                "platform": plan["platform"],
+                "status": "ready",
+                "checks": [
+                    {"id": "readiness", "status": "passed", "message": "OK"}
+                ],
+            }
+            (tmp_dir / "readiness-report.json").write_text(
+                json.dumps(readiness, indent=2), encoding="utf-8"
+            )
+
+            result = CliInvoker.run("environment", "validate", str(tmp_dir))
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_validate_detects_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1200,6 +1260,51 @@ class SshExecutorEnvTest(unittest.TestCase):
         self.assertEqual(result.stdout, "ok")
         self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(popen.call_args.kwargs["errors"], "replace")
+
+    def test_streaming_timeout_interrupts_silent_stdout_reader(self) -> None:
+        from unittest.mock import patch
+
+        from pyframework_pipeline.acquisition.ssh_executor import SshExecutor
+
+        class SilentStdout:
+            def __init__(self, killed: threading.Event) -> None:
+                self.killed = killed
+
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> str:
+                self.killed.wait(0.2)
+                raise StopIteration
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.killed = threading.Event()
+                self.stdout = SilentStdout(self.killed)
+                self.returncode = None
+
+            def wait(self, timeout: int | None = None) -> None:
+                if not self.killed.is_set():
+                    raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=timeout)
+                self.returncode = -9
+
+            def kill(self) -> None:
+                self.killed.set()
+                self.returncode = -9
+
+        executor = SshExecutor(host="myhost")
+        fake = FakeProcess()
+        started = time.monotonic()
+        with patch(
+            "pyframework_pipeline.acquisition.ssh_executor.subprocess.Popen",
+            return_value=fake,
+        ):
+            result = executor.run("sleep forever", timeout=1, stream=True)
+
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("TIMEOUT after 1s", result.stdout)
+        self.assertTrue(fake.killed.is_set())
 
 
 class DockerRegistryTest(unittest.TestCase):

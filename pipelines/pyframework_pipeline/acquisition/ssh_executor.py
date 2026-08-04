@@ -11,6 +11,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -148,18 +149,42 @@ class SshExecutor:
             errors="replace",
         )
         stdout_lines: list[str] = []
+        reader_errors: list[BaseException] = []
+
+        def read_stdout() -> None:
+            try:
+                if proc.stdout is None:
+                    return
+                for line in proc.stdout:
+                    line = line.rstrip("\n")
+                    print(f"  {line}", flush=True)
+                    stdout_lines.append(line)
+            except BaseException as exc:  # surfaced in the caller thread below
+                reader_errors.append(exc)
+
+        reader = threading.Thread(
+            target=read_stdout,
+            name="pyframework-ssh-stdout",
+            daemon=True,
+        )
+        reader.start()
+        timed_out = False
         try:
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                print(f"  {line}", flush=True)
-                stdout_lines.append(line)
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            timed_out = True
             proc.kill()
             stdout_lines.append(f"[TIMEOUT after {timeout}s]")
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        reader.join(timeout=5)
+        if reader_errors and not timed_out:
+            raise reader_errors[0]
         return subprocess.CompletedProcess(
             args=args,
-            returncode=proc.returncode,
+            returncode=124 if timed_out else proc.returncode,
             stdout="\n".join(stdout_lines),
             stderr="",
         )
