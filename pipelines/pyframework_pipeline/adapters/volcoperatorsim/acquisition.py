@@ -107,7 +107,7 @@ def run_volc_acquisition(
         if recover_remote:
             logger.info("Recovering remote COMPLETE scope pipeline_e2e")
             return
-        if settings.task_input_overrides:
+        if settings.operator_tasks or settings.task_input_overrides:
             overlays = _write_and_push_full_task_overlays(
                 executor=executor,
                 plan=context[3],

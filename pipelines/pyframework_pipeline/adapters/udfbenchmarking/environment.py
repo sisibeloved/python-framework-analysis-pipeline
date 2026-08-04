@@ -64,6 +64,7 @@ class UdfBenchmarkingEnvironmentAdapter:
             "BASE_IMAGE": base_image,
             "UDF_BENCHMARKING_REPO": repo,
             "UDF_BENCHMARKING_REVISION": revision,
+            "NUMPY_VERSION": software.get("numpyVersion", "2.4.3"),
             "PY_SPY_VERSION": software.get("pySpyVersion", ""),
             "APT_MIRROR": software.get("aptMirror", ""),
             "APT_SECURITY_MIRROR": software.get("aptSecurityMirror", ""),

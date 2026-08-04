@@ -151,6 +151,19 @@ class UdfBenchmarkingEnvironmentTest(unittest.TestCase):
         self.assertIn("py-spy", script)
         self.assertIn("python -c", script)
 
+    def test_build_script_uses_lf_line_endings_for_remote_bash(self) -> None:
+        script = (
+            REPO_ROOT
+            / "pipelines"
+            / "pyframework_pipeline"
+            / "adapters"
+            / "udfbenchmarking"
+            / "scripts"
+            / "build-udfbenchmarking-image.sh"
+        ).read_bytes()
+
+        self.assertNotIn(b"\r\n", script)
+
     def test_build_script_handles_apt_source_and_perf_package_variants(self) -> None:
         script = (
             REPO_ROOT
@@ -331,6 +344,37 @@ class UdfBenchmarkingEnvironmentTest(unittest.TestCase):
             reference_config["software"]["pythonFlamegraph"],
             {"enabled": True, "rate": 10, "subprocesses": True},
         )
+
+    def test_reference_config_pins_numpy_version_for_image_build(self) -> None:
+        reference_config = _load_yaml(UDF_REFERENCE_ROOT / "environment.yaml.example")
+        script = (
+            REPO_ROOT
+            / "pipelines"
+            / "pyframework_pipeline"
+            / "adapters"
+            / "udfbenchmarking"
+            / "scripts"
+            / "build-udfbenchmarking-image.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(reference_config["software"]["numpyVersion"], "2.4.3")
+        self.assertIn("ARG NUMPY_VERSION", script)
+        self.assertIn('"numpy==${NUMPY_VERSION}"', script)
+        self.assertIn('--build-arg "NUMPY_VERSION=${NUMPY_VERSION:-2.4.3}"', script)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_yaml = _write_udf_project(Path(tmp))
+
+            result = CliInvoker.run(
+                "environment", "plan", str(project_yaml), "--platform", "arm"
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(result.stdout)
+        build_step = next(
+            s for s in plan["steps"] if s["id"] == "build-udfbenchmarking-image"
+        )
+        self.assertIn("NUMPY_VERSION=2.4.3", build_step["command"])
 
 
 class UdfBenchmarkingOrchestratorTest(unittest.TestCase):
@@ -555,8 +599,8 @@ def _write_udf_project(
         "  udfBenchmarkingRepo: https://gitcode.com/stone31415/UDF_Benchmarking.git",
         "  udfBenchmarkingRevision: 29159573d08998a5aee238034d05416510a69d02",
         "  udfBenchmarkingImages:",
-        "    arm: udf-benchmarking-bench:py311-arm",
-        "    x86: udf-benchmarking-bench:py311-x86",
+        "    arm: udf-benchmarking-bench:py311-np243-arm",
+        "    x86: udf-benchmarking-bench:py311-np243-x86",
         "  udfBenchmarkingContainer: udf-benchmarking-bench",
         "  benchmarkName: MockVideoE2EUDF",
         "  benchmarkConfigFile: config.yaml",

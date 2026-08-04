@@ -205,6 +205,33 @@ def compact_period_report(source: Path, output: Path) -> dict[str, int]:
     }
 
 
+def _perf_report_command(
+    *,
+    real_perf: str,
+    perf_data: Path,
+    start_seconds: float,
+    end_seconds: float,
+    buildid_dir: Path | None,
+) -> list[str]:
+    command = [real_perf]
+    if buildid_dir is not None:
+        command.extend(("--buildid-dir", str(buildid_dir)))
+    command.extend(
+        (
+            "report",
+            "--stdio",
+            "--no-children",
+            "--show-total-period",
+            f"--time={start_seconds:.9f},{end_seconds:.9f}",
+            "--field-separator=|",
+            "--fields=overhead,period,sample,comm,pid,dso,symbol,addr",
+            "-i",
+            str(perf_data),
+        )
+    )
+    return command
+
+
 def split_context_perf(
     *,
     context_root: Path,
@@ -238,24 +265,34 @@ def split_context_perf(
         raise FileNotFoundError(dso_manifest)
     timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
     arch_id = arch or platform.machine()
+    raw_index_cache = (
+        buildid_dir.parent
+        / (
+            "raw-sample-index-"
+            + hashlib.sha256(
+                (
+                    str(perf_data.resolve())
+                    + f":{perf_data.stat().st_size}:{perf_data.stat().st_mtime_ns}"
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            + ".json"
+        )
+        if buildid_dir is not None
+        else None
+    )
     outputs: list[Path] = []
     for window in windows:
         case = f"operator_case_perf__{window.case_hash}__context_window_001"
         directory = output_root / timestamp / arch_id / engine / case
         directory.mkdir(parents=True, exist_ok=True)
         report = directory / "perf-report-period.txt"
-        command = [
-            real_perf,
-            "report",
-            "--stdio",
-            "--no-children",
-            "--show-total-period",
-            f"--time={window.start_seconds:.9f},{window.end_seconds:.9f}",
-            "--field-separator=|",
-            "--fields=overhead,period,sample,comm,pid,dso,symbol,addr",
-            "-i",
-            str(perf_data),
-        ]
+        command = _perf_report_command(
+            real_perf=real_perf,
+            perf_data=perf_data,
+            start_seconds=window.start_seconds,
+            end_seconds=window.end_seconds,
+            buildid_dir=buildid_dir,
+        )
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.returncode != 0:
             raise RuntimeError(
@@ -283,6 +320,10 @@ def split_context_perf(
         ]
         if buildid_dir is not None:
             resolve_command.extend(("--buildid-dir", str(buildid_dir)))
+        if raw_index_cache is not None:
+            resolve_command.extend(
+                ("--raw-index-cache", str(raw_index_cache))
+            )
         subprocess.run(resolve_command, check=True)
         full_resolved = directory / "perf-report-period-resolved-full.txt"
         os.replace(resolved, full_resolved)

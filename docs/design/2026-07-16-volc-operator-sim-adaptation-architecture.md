@@ -55,7 +55,7 @@ Volc Operator Sim、Daft、Ray、Lance、Data-Juicer、逐算子、perf、跨架
 - ARM `blue-98` 与 x86 `root@85.93.9.221:22` 的远程部署。
 - 每个平台一个 Docker 容器，容器内同时提供 `xarch` 和 `xdj`。
 - Host 预下载并持久化数据、模型、fixtures 与结果。
-- `core_dual_engine` 四模态、双引擎、`smoke` 一轮的首次功能验收。
+- 文本、视频、图像、音频、PDF、AD 六模态默认测试集的 `smoke` 一轮功能验收；原 `target_14` 完整矩阵保留为显式扩展测试集。
 - Pipeline E2E、上下文逐算子、隔离算子 E2E、逐算子 perf/火焰图/ASM。
 - artifact 标准化、ARM/x86 与 Daft/DJ 对比报告。
 
@@ -179,7 +179,7 @@ flowchart TB
 
 #### 5.2.1.1 关键系统用例
 
-用户执行一次项目 run，系统完成 Host 准备、容器部署、四模态双引擎 smoke、逐算子 fan-out、perf 归因、artifact 回收和跨平台报告。
+用户执行一次默认项目 run，系统完成 Host 准备、容器部署、六模态代表 Pipeline smoke、逐算子 fan-out、perf 归因、artifact 回收和跨平台报告；需要完整覆盖时显式选择十四条扩展项目。
 
 #### 5.2.1.2 交互场景
 

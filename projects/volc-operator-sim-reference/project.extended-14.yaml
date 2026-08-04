@@ -1,0 +1,43 @@
+id: volc-operator-sim-extended-14
+name: Volc Operator Sim Extended 14-Pipeline Analysis
+fourLayerRoot: .
+workload:
+  localDir: workload
+  benchmark: volc-operator-sim
+  testSet: extended_14
+  group: target_14
+  profile: smoke
+  rounds: 1
+  timeout: 14400
+  operatorAnalysis:
+    enabled: true
+    group: target_14
+    tasks:
+      - pipeline_text_fineweb_full_min
+      - text_corpus_minhash_dedup
+      - pipeline_text_vectorize_full_min
+      - audio_asr_prep_canonical
+      - video_clip_etl_canonical
+      - video_scene_split_etl
+      - video_vectorize_cpu
+      - pipeline_video_full_min
+      - image_laion_clean_canonical
+      - image_coco_audit
+      - pipeline_image_full_min
+      - text_anti_join_test
+      - pipeline_pdf_full_min
+      - pipeline_ad_nuscenes_min
+    contextTiming: true
+    isolatedTiming: true
+    profiling: true
+    warmup: 1
+    rounds: 3
+    minPerfSamples: 5000
+    topSymbols: 20
+bridge:
+  repo: XuanYuL5/volc_operator_sim
+  platform: gitcode
+run:
+  platforms:
+    - arm
+    - x86

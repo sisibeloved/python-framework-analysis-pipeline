@@ -145,6 +145,83 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
         self.assertEqual(report["status"], "ok", report["issues"])
         self.assertEqual(report["issueCount"], 0)
 
+    def test_reference_project_defaults_to_six_modality_pipelines(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        workload = payload["workload"]
+        analysis = workload["operatorAnalysis"]
+
+        self.assertEqual(workload["testSet"], "default_6")
+        self.assertEqual(workload["group"], "target_14")
+        self.assertEqual(analysis["group"], "target_14")
+        self.assertEqual(
+            analysis["tasks"],
+            [
+                "pipeline_text_fineweb_full_min",
+                "video_scene_split_etl",
+                "pipeline_image_full_min",
+                "audio_asr_prep_canonical",
+                "pipeline_pdf_full_min",
+                "pipeline_ad_nuscenes_min",
+            ],
+        )
+        overrides = analysis["inputOverrides"]
+        self.assertEqual(
+            overrides["video_scene_split_etl"]["source_dataset"],
+            "panda_70m",
+        )
+        self.assertEqual(
+            overrides["video_scene_split_etl"]["path"],
+            "fixtures/canonical/panda_70m_video.lance",
+        )
+        self.assertEqual(
+            overrides["audio_asr_prep_canonical"]["source_dataset"],
+            "common_voice",
+        )
+        self.assertEqual(
+            overrides["audio_asr_prep_canonical"]["path"],
+            "fixtures/canonical/common_voice_audio.lance",
+        )
+
+    def test_extended_project_preserves_the_original_fourteen_pipelines(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = (
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "project.extended-14.yaml"
+        )
+        payload = load_project_config(project)
+        workload = payload["workload"]
+        analysis = workload["operatorAnalysis"]
+
+        self.assertEqual(workload["testSet"], "extended_14")
+        self.assertEqual(workload["group"], "target_14")
+        self.assertEqual(analysis["group"], "target_14")
+        self.assertEqual(
+            analysis["tasks"],
+            [
+                "pipeline_text_fineweb_full_min",
+                "text_corpus_minhash_dedup",
+                "pipeline_text_vectorize_full_min",
+                "audio_asr_prep_canonical",
+                "video_clip_etl_canonical",
+                "video_scene_split_etl",
+                "video_vectorize_cpu",
+                "pipeline_video_full_min",
+                "image_laion_clean_canonical",
+                "image_coco_audit",
+                "pipeline_image_full_min",
+                "text_anti_join_test",
+                "pipeline_pdf_full_min",
+                "pipeline_ad_nuscenes_min",
+            ],
+        )
+        self.assertNotIn("inputOverrides", analysis)
+
     def test_text_vectorize_10k_project_pins_frozen_host_input(self) -> None:
         from pyframework_pipeline.config import load_project_config
 

@@ -6,6 +6,7 @@ IMAGE_NAME="${IMAGE_NAME:-udf-benchmarking-bench:py311-${ARCH_TAG}}"
 BASE_IMAGE="${BASE_IMAGE:-python:3.11-slim}"
 UDF_BENCHMARKING_REPO="${UDF_BENCHMARKING_REPO:-https://gitcode.com/stone31415/UDF_Benchmarking.git}"
 UDF_BENCHMARKING_REVISION="${UDF_BENCHMARKING_REVISION:-}"
+NUMPY_VERSION="${NUMPY_VERSION:-2.4.3}"
 PY_SPY_VERSION="${PY_SPY_VERSION:-}"
 
 tmpdir="$(mktemp -d)"
@@ -17,6 +18,7 @@ FROM ${BASE_IMAGE}
 
 ARG UDF_BENCHMARKING_REPO
 ARG UDF_BENCHMARKING_REVISION
+ARG NUMPY_VERSION
 ARG PY_SPY_VERSION
 ARG APT_MIRROR
 ARG APT_SECURITY_MIRROR
@@ -93,7 +95,7 @@ RUN set -eux; \
     python -m pip install $pip_trusted_args --upgrade pip setuptools wheel; \
     python -m pip install $pip_trusted_args \
         getdaft \
-        numpy \
+        "numpy==${NUMPY_VERSION}" \
         opencv-python-headless \
         psutil \
         pyyaml \
@@ -131,6 +133,7 @@ build_args=(
   --build-arg "BASE_IMAGE=${BASE_IMAGE}"
   --build-arg "UDF_BENCHMARKING_REPO=${UDF_BENCHMARKING_REPO}"
   --build-arg "UDF_BENCHMARKING_REVISION=${UDF_BENCHMARKING_REVISION:-}"
+  --build-arg "NUMPY_VERSION=${NUMPY_VERSION:-2.4.3}"
   --build-arg "PY_SPY_VERSION=${PY_SPY_VERSION:-}"
   --build-arg "APT_MIRROR=${APT_MIRROR:-}"
   --build-arg "APT_SECURITY_MIRROR=${APT_SECURITY_MIRROR:-}"

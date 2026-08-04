@@ -78,7 +78,7 @@ flowchart LR
 
 ## 1.3 功能域规格设计
 
-- 首次验收：ARM/x86、`core_dual_engine`、Daft/DJ、smoke、1 round。
+- 首次验收：ARM/x86、六模态默认测试集、按 Pipeline 声明的引擎矩阵、smoke、1 round；完整十四条为扩展验收。
 - 数据准备：Host `/home/lxy/de_bench_full` 持久化，容器只消费 bind mount。
 - operator 范围：task 中全部非 sink operator；sink/finalize 作为独立 pseudo-stage。
 - profiling：timing、perf stat、perf record、py-spy 分离跑次。
@@ -192,7 +192,8 @@ Host 缓存避免每次重建镜像重新下载；ARM/x86 可并行准备；同�
 
 逐算子分析配置位于 `workload.operatorAnalysis`。需要只采集正式分组中的部分
 pipeline 时，可用 `group` 指定目标正式分组，并用 `tasks` 给出 pipeline ID
-白名单；执行计划会拒绝不属于该分组的 ID，避免静默误跑其他任务。
+白名单；该白名单同时约束 Pipeline E2E 和后续逐算子阶段。执行计划会拒绝不属于
+该分组的 ID，避免 E2E 静默运行整个 group 或逐算子阶段误跑其他任务。
 
 ### 1.5.1 功能概述
 
@@ -204,7 +205,8 @@ pipeline 时，可用 `group` 指定目标正式分组，并用 `tasks` 给出 p
 
 执行四个相互隔离的 pass：
 
-1. `pipeline_e2e`：正式 `run_all_pipelines.sh`，获得完整 E2E。
+1. `pipeline_e2e`：未配置 `tasks` 时运行正式 `run_all_pipelines.sh`；配置
+   `tasks` 时逐条运行派生 full-task overlay，获得同一白名单的完整 E2E。
 2. `pipeline_context`：`materialize_policy=per_op`、`fuse_mappers=false`，获得链路内 operator timing。
 3. `operator_case_e2e`：每个 operator 使用冻结 stage input 独立运行，获得该 case 完整 wall-clock。
 4. `operator_case_perf`：相同 case 独立 `MODE=perfrecord/profile`，获得 CPU sample、火焰图、RSS 和 ASM。
@@ -213,7 +215,7 @@ pipeline 时，可用 `group` 指定目标正式分组，并用 `tasks` 给出 p
 
 #### 1.5.3.1 Pipeline E2E 功能实现设计
 
-首次验收命令语义为 `GROUP=core_dual_engine PROFILE_NAME=smoke ROUNDS=1`。Adapter 为每个平台设置独立 `OUT_ROOT`，防止历史结果混入。本 pass 只做轻量 perf stat/proc sampler，不做重型 profiling。
+首次验收从 `target_14` 中显式选择六条默认 Pipeline，并使用 `PROFILE_NAME=smoke ROUNDS=1`。Adapter 逐条执行 full-task overlay，为每个平台设置独立 `OUT_ROOT`，防止 group 内其他 Pipeline 或历史结果混入。本 pass 只做轻量 perf stat/proc sampler，不做重型 profiling。扩展项目显式选择原十四条。
 
 #### 1.5.3.2 上下文逐算子功能实现设计
 

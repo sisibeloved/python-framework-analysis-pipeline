@@ -157,6 +157,50 @@ class VolcOperatorOrchestrationTest(unittest.TestCase):
         render.assert_called_once_with(run_dir / "arm")
         self.assertIn(str(report_path), stdout.getvalue())
 
+    def test_operator_run_cli_refreshes_acquisition_manifest(self) -> None:
+        from pyframework_pipeline.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = _write_volc_project(root / "project")
+            run_dir = root / "run"
+            with (
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim.adapter."
+                    "VolcOperatorSimAdapter.collect_context_timing",
+                    return_value=run_dir / "arm/operators/raw/pipeline_context",
+                ) as context,
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim."
+                    "acquisition_manifest.build_acquisition_manifest",
+                    return_value=run_dir
+                    / "arm/operators/acquisition-manifest.json",
+                ) as build_manifest,
+                patch("sys.stdout", new_callable=StringIO),
+            ):
+                exit_code = main(
+                    [
+                        "operator",
+                        "run",
+                        str(project),
+                        "--platform",
+                        "arm",
+                        "--run-dir",
+                        str(run_dir),
+                        "--mode",
+                        "context",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        context.assert_called_once_with(
+            project, run_dir, "arm", force=False
+        )
+        build_manifest.assert_called_once_with(
+            run_dir / "arm",
+            platform="arm",
+        )
+
     def test_volc_collect_checkpoints_require_stage_complete_not_future_normalized_files(self) -> None:
         from pyframework_pipeline.orchestrator import _run_collect_substep
 

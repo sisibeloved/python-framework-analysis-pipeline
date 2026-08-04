@@ -5,14 +5,29 @@ This reference keeps the target repository black-boxed at commit
 from that checkout and writes all derived tasks under the Host-persistent
 `/home/lxy/de_bench_full/operator-cache` mount; it never modifies the checkout.
 
-The initial acceptance uses `core_dual_engine`, `smoke`, and one pipeline round.
-The target's minimal text/image/audio/video fixtures are generated into
-`/home/lxy/de_bench_full/fixtures`; the builder's temporary raw media is exposed
-at `raw/min_fixtures` through a nested Host mount, so both canonical inputs and
-their source files survive container replacement. For
-fair or scale runs, first add every dataset/model object to `data-sources.json`
-with a verified SHA-256; the deploy preparation step downloads and verifies
-those objects on each Host before the image or container step begins.
+`project.yaml` is the default six-modality test set. It selects one business
+pipeline for each of text, video, image, audio, PDF, and AD from the pinned
+upstream `target_14` group. `project.extended-14.yaml` preserves the complete
+original 14-pipeline matrix as the extended test set. Explicit task selection
+applies to Pipeline E2E as well as every operator-analysis scope, so the default
+entry point does not run the other eight pipelines in the background.
+
+The default video and audio inputs are Panda-70M and Common Voice respectively:
+
+- `fixtures/canonical/panda_70m_video.lance`
+- `fixtures/canonical/common_voice_audio.lance`
+
+Their JSONL mirrors and metadata files use the same basename. These are
+Host-persistent frozen inputs and must be prepared before the default test set
+runs; the adapter does not silently fall back to the upstream MSR-VTT or
+LibriSpeech fixtures. The extended test set has no input overrides and retains
+the original 14-pipeline input contracts from the pinned target checkout.
+
+For fair or scale runs, first add every downloadable dataset/model object to
+`data-sources.json` with a verified SHA-256. The deploy preparation step
+downloads and verifies those objects on each Host before the image or container
+step begins. Large or license-gated datasets that cannot be represented by one
+direct URL must be materialized and frozen under the paths above on the Host.
 
 Typical flow:
 
@@ -31,6 +46,13 @@ PYTHONPATH=pipelines python3 -m pyframework_pipeline environment deploy \
 
 PYTHONPATH=pipelines python3 -m pyframework_pipeline run \
   projects/volc-operator-sim-reference/project.yaml --stop-before 7
+```
+
+Run the extended 14-pipeline set explicitly with:
+
+```bash
+PYTHONPATH=pipelines python3 -m pyframework_pipeline run \
+  projects/volc-operator-sim-reference/project.extended-14.yaml --stop-before 7
 ```
 
 完整流程会在 `5c` 采集汇总后执行 `5c.1 operator readable reports`。也可以只用

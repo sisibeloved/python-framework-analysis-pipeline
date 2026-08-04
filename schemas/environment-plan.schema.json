@@ -47,7 +47,7 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["probe", "check", "prepare", "install", "configure", "start", "stop", "cleanup", "build", "system-install", "docker-install", "python-install", "framework-install", "framework-start", "framework-readiness", "framework-smoke-test"]
+            "enum": ["probe", "check", "prepare", "install", "configure", "start", "stop", "cleanup", "build", "system-install", "docker-install", "python-install", "framework-install", "framework-start", "framework-readiness", "framework-smoke-test", "framework-fingerprint"]
           },
           "hostRef": {
             "type": "string",
