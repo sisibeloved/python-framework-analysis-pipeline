@@ -4,12 +4,38 @@ fourLayerRoot: .
 workload:
   localDir: workload
   benchmark: volc-operator-sim
-  group: core_dual_engine
+  testSet: default_6
+  group: target_14
   profile: smoke
   rounds: 1
   timeout: 14400
   operatorAnalysis:
     enabled: true
+    group: target_14
+    tasks:
+      - pipeline_text_fineweb_full_min
+      - video_scene_split_etl
+      - pipeline_image_full_min
+      - audio_asr_prep_canonical
+      - pipeline_pdf_full_min
+      - pipeline_ad_nuscenes_min
+    inputOverrides:
+      video_scene_split_etl:
+        kind: lance
+        modality: video
+        field: file_path
+        path: fixtures/canonical/panda_70m_video.lance
+        jsonl_mirror: fixtures/canonical/panda_70m_video.mirror.jsonl
+        mirror_meta: fixtures/canonical/panda_70m_video.mirror.meta.json
+        source_dataset: panda_70m
+      audio_asr_prep_canonical:
+        kind: lance
+        modality: audio
+        field: file_path
+        path: fixtures/canonical/common_voice_audio.lance
+        jsonl_mirror: fixtures/canonical/common_voice_audio.mirror.jsonl
+        mirror_meta: fixtures/canonical/common_voice_audio.mirror.meta.json
+        source_dataset: common_voice
     contextTiming: true
     isolatedTiming: true
     profiling: true

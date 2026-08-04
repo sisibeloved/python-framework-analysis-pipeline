@@ -145,12 +145,21 @@ fourLayerRoot: .
 
 workload:
   benchmark: volc-operator-sim
-  group: core_dual_engine
+  testSet: default_6
+  group: target_14
   profile: smoke
   rounds: 1
   timeout: 14400
   operatorAnalysis:
     enabled: true
+    group: target_14
+    tasks:
+      - pipeline_text_fineweb_full_min
+      - video_scene_split_etl
+      - pipeline_image_full_min
+      - audio_asr_prep_canonical
+      - pipeline_pdf_full_min
+      - pipeline_ad_nuscenes_min
     contextTiming: true
     isolatedTiming: true
     profiling: true
@@ -255,7 +264,7 @@ for source in manifest:
 ```json
 {
   "schemaVersion": 1,
-  "profile": "core_dual_engine",
+  "profile": "default_6",
   "generatedAt": "2026-07-16T00:00:00Z",
   "entries": [
     {
@@ -360,7 +369,7 @@ PlanStep 的 `scriptPath` 指向 adapter 内脚本；环境部署复用现有 up
 
 ## 4.1 实现概述
 
-E2E pass 复用目标正式 group runner。上下文 pass 逐 task 执行 attribution profile，以现有 `operator_timings`、`op_boundaries`、`api_timings`、`timing_breakdown` 为原始事实。
+E2E pass 在未配置任务白名单时复用目标正式 group runner；配置白名单时逐 task 执行 full-task overlay。上下文 pass 逐 task 执行 attribution profile，以现有 `operator_timings`、`op_boundaries`、`api_timings`、`timing_breakdown` 为原始事实。
 
 ## 4.2 关键算法与流程
 
@@ -368,10 +377,11 @@ E2E pass 复用目标正式 group runner。上下文 pass 逐 task 执行 attrib
 
 ```text
 OUT_ROOT=<host>/bench-results/pyframework/<run_id>/<arch>/pipeline-e2e
-GROUP=core_dual_engine
+GROUP=target_14
+TASKS=pipeline_text_fineweb_full_min,video_scene_split_etl,pipeline_image_full_min,audio_asr_prep_canonical,pipeline_pdf_full_min,pipeline_ad_nuscenes_min
 PROFILE_NAME=smoke
 ROUNDS=1
-bash scripts/pipelines/run_all_pipelines.sh
+run each selected task through its generated full-task overlay
 ```
 
 每个平台使用全新 OUT_ROOT。Adapter 不从全局 bench-results 递归汇总历史文件。
@@ -1141,7 +1151,7 @@ ARM `blue-98` 和 x86 `85.93.9.221`：
 
 1. Host prepare manifest complete。
 2. image/container/readiness complete。
-3. `core_dual_engine` 四 task × 双引擎 smoke 成功。
+3. 默认六条按各自声明的引擎矩阵 smoke 成功；扩展项目仍可完整选择原十四条。
 4. 每个 task 有 Pipeline E2E 和 context timing。
 5. 每个支持隔离的非 sink operator 有 generated case、同源 input manifest、isolated timing 和 perfrecord artifact。
 6. 每条 operator record 有 revision、image id、Conda fingerprint、input fingerprint、quality 和 source artifact。

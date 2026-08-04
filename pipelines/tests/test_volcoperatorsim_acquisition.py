@@ -656,6 +656,38 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
             pushed["pipeline_text__full_pipeline_e2e.json"]["pipeline"][-1]["params"]["output_uri"],
         )
 
+    def test_selected_tasks_route_p0_through_overlays_without_input_overrides(self) -> None:
+        executor = FakeExecutor()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = _write_volc_project(root / "project")
+            project.write_text(
+                project.read_text(encoding="utf-8").replace(
+                    "    topSymbols: 20\n",
+                    "    topSymbols: 20\n"
+                    "    tasks:\n"
+                    "      - pipeline_text\n",
+                ),
+                encoding="utf-8",
+            )
+            run_dir = root / "run"
+            with patch(
+                "pyframework_pipeline.remote.build_executor", return_value=executor
+            ):
+                VolcOperatorSimAdapter().run_benchmark(project, run_dir, "arm")
+
+            overlays = list(
+                (run_dir / "arm/operators/overlays").glob(
+                    "pipeline_text__full_pipeline_e2e.json"
+                )
+            )
+
+        commands = "\n".join(executor.commands)
+        self.assertNotIn("run_all_pipelines.sh", commands)
+        self.assertIn("run_perf_suite.py", commands)
+        self.assertIn("__full_pipeline_e2e.json", commands)
+        self.assertEqual(len(overlays), 1)
+
     def test_operator_analysis_can_override_group_and_select_tasks(self) -> None:
         settings = _load_settings(
             {
