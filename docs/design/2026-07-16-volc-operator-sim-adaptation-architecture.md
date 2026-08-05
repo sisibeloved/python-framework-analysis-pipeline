@@ -124,7 +124,7 @@ flowchart LR
 
 ## 3.3 假设和约束
 
-- 目标仓库设计基线固定为 commit `56d3b6856895427a0519cbaa437d55443fcb578b`，配置可显式覆盖。
+- 目标仓库设计基线固定为 commit `c0c52fd514510bc223d76767e55bcefbc190033c`，配置可显式覆盖。
 - 目标仓库 `unblock_perf=false` 时，只输出功能与诊断结论。
 - ARM 与 x86 Host 均能通过 SSH 访问并具备 Docker、磁盘和 perf 权限。
 - 本项目 YAML 解析器不支持 flow-style map/list，新增配置全部使用缩进块。
@@ -525,5 +525,5 @@ Docker daemon、SSH、Git 和下载工具沿用 Host 安全策略；本设计不
 2. `pipelines/pyframework_pipeline/contracts/adapter.py`。
 3. `pipelines/pyframework_pipeline/contracts/timing.py`。
 4. `pipelines/pyframework_pipeline/analyze/perf_analysis_common.py`。
-5. `volc_operator_sim` commit `56d3b6856895427a0519cbaa437d55443fcb578b`。
+5. `volc_operator_sim` commit `c0c52fd514510bc223d76767e55bcefbc190033c`。
 6. 目标仓库 `docs/design/DATAFLOW_ARCHITECTURE_DESIGN.md`、`WORKLOAD_WALLCLOCK_ATTRIBUTION_DESIGN.md`、`PERF_LOCK_DESIGN.md`。

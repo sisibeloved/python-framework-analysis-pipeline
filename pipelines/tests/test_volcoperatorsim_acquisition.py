@@ -15,6 +15,8 @@ from unittest.mock import patch
 from pyframework_pipeline.adapters.volcoperatorsim.adapter import VolcOperatorSimAdapter
 from pyframework_pipeline.adapters.volcoperatorsim.acquisition import (
     _apply_task_input_overrides,
+    _capture_overlay_command,
+    _context_perf_windows_complete,
     _load_settings,
     _normalize_real_task_contracts,
     _normalize_pipeline_timing,
@@ -22,6 +24,7 @@ from pyframework_pipeline.adapters.volcoperatorsim.acquisition import (
     _prepare_stage_resume,
     _read_completed_capture_cases,
     _remote_thin_context_view_command,
+    _run_context_fast_operator_profiles,
     _run_with_profile_cpu_envelope,
     _snapshot_mirror_command,
     _should_recover_remote,
@@ -80,6 +83,7 @@ class FakeExecutor:
         fail_once_on: str | None = None,
         remote_complete: bool = False,
         completed_cases: set[tuple[str, str]] | None = None,
+        completed_case_samples: dict[tuple[str, str], int] | None = None,
         push_ok: bool = True,
         fail_once_returncode: int = 17,
         target_inputs: dict | None = None,
@@ -88,6 +92,7 @@ class FakeExecutor:
         self.fail_once_on = fail_once_on
         self.remote_complete = remote_complete
         self.completed_cases = completed_cases or set()
+        self.completed_case_samples = completed_case_samples or {}
         self.push_ok = push_ok
         self.fail_once_returncode = fail_once_returncode
         self.target_inputs = target_inputs
@@ -116,6 +121,7 @@ class FakeExecutor:
                     "cpuSvg": True,
                     "annotate": True,
                     "symbolized": True,
+                    "sampleCount": self.completed_case_samples.get((case, engine), 0),
                 }
                 for case, engine in sorted(self.completed_cases)
             ]
@@ -180,6 +186,28 @@ class FakeExecutor:
 
 
 class VolcOperatorSimAcquisitionTest(unittest.TestCase):
+    def test_context_perf_split_reuses_complete_symbolized_windows(self) -> None:
+        task = {
+            "operators": [
+                {"operatorCaseId": "task::000::first"},
+                {"operatorCaseId": "task::001::second"},
+            ]
+        }
+        inventory = {}
+        for case_id in ("task::000::first", "task::001::second"):
+            digest = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:12]
+            inventory[
+                (f"operator_case_perf__{digest}__context_window_001", "daft_ray")
+            ] = {"symbolized": True}
+
+        self.assertTrue(
+            _context_perf_windows_complete(task, "daft_ray", inventory)
+        )
+        inventory.pop(next(iter(inventory)))
+        self.assertFalse(
+            _context_perf_windows_complete(task, "daft_ray", inventory)
+        )
+
     def test_adapter_requires_explicit_project_opt_in_for_formal_operator_reports(
         self,
     ) -> None:
@@ -259,6 +287,480 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
             {"text_chunk_mapper": 10000, "bge_vectorize_mapper": 32},
         )
 
+    def test_fast_operator_profiles_ignore_configured_operators_outside_task(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "audio_pipeline": {
+                            "kind": "file_manifest",
+                            "path": "fixtures/audio.jsonl",
+                            "manifest_path": "fixtures/audio.jsonl",
+                            "rows": 512,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {
+                            "text_chunk_mapper": 10000,
+                            "bge_vectorize_mapper": 32,
+                        }
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "audio_pipeline",
+                "engines": ["daft_ray", "datajuicer_native"],
+                "operators": [
+                    {
+                        "operatorId": "audio_duration_filter",
+                        "operatorCaseId": "audio_pipeline::000::audio_duration_filter",
+                    }
+                ],
+            },
+            support={"microprofile": "/bench/microprofile.py"},
+        )
+
+        self.assertEqual(executor.commands, [])
+
+    def test_fast_operator_profiles_skip_datajuicer_diagnostic_engine(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "text_pipeline": {
+                            "kind": "lance",
+                            "field": "text",
+                            "path": "fixtures/text.lance",
+                            "jsonl_mirror": "fixtures/text.jsonl",
+                            "rows": 50,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {"clean_html_mapper": 1000}
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "text_pipeline",
+                "engines": ["daft_ray", "datajuicer_native"],
+                "operators": [
+                    {
+                        "operatorId": "clean_html_mapper",
+                        "operatorCaseId": "text_pipeline::000::clean_html_mapper",
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        joined = "\n".join(executor.commands)
+        self.assertIn("ENGINE=daft_ray", joined)
+        self.assertNotIn("ENGINE=datajuicer_native", joined)
+
+    def test_fast_operator_profiles_reuse_completed_cases_above_sample_floor(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "text_pipeline": {
+                            "kind": "lance",
+                            "field": "text",
+                            "path": "fixtures/text.lance",
+                            "jsonl_mirror": "fixtures/text.jsonl",
+                            "rows": 50,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorMinSamples": 5000,
+                        "fastOperatorCalls": {"clean_html_mapper": 1000},
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        case = "operator_case_perf__f595a3bb3dc9__context_fast_001"
+        executor = FakeExecutor(
+            completed_cases={(case, "daft_ray")},
+            completed_case_samples={(case, "daft_ray"): 6000},
+        )
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "text_pipeline",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "clean_html_mapper",
+                        "operatorCaseId": "pipeline_text_fineweb_full_min@v0::000::clean_html_mapper::44136fa355b3",
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        joined = "\n".join(executor.commands)
+        self.assertNotIn("--operator clean_html_mapper", joined)
+
+    def test_fast_operator_profiles_reuse_context_window_above_sample_floor(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "text_pipeline": {
+                            "kind": "lance",
+                            "field": "text",
+                            "path": "fixtures/text.lance",
+                            "jsonl_mirror": "fixtures/text.jsonl",
+                            "rows": 50,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorMinSamples": 5000,
+                        "fastOperatorCalls": {"clean_html_mapper": 1000},
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        case_id = (
+            "pipeline_text_fineweb_full_min@v0::000::"
+            "clean_html_mapper::44136fa355b3"
+        )
+        case_hash = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:12]
+        window = f"operator_case_perf__{case_hash}__context_window_001"
+        executor = FakeExecutor(
+            completed_cases={(window, "daft_ray")},
+            completed_case_samples={(window, "daft_ray"): 6000},
+        )
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "text_pipeline",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "clean_html_mapper",
+                        "operatorCaseId": case_id,
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        joined = "\n".join(executor.commands)
+        self.assertNotIn("--operator clean_html_mapper", joined)
+
+    def test_fast_operator_profiles_cover_duplicate_operator_ids(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "audio_pipeline": {
+                            "kind": "lance",
+                            "field": "file_path",
+                            "path": "fixtures/audio.lance",
+                            "jsonl_mirror": "fixtures/audio.jsonl",
+                            "rows": 512,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {"audio_duration_filter": 1536}
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "audio_pipeline",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "audio_duration_filter",
+                        "operatorCaseId": "audio_pipeline::001::audio_duration_filter",
+                    },
+                    {
+                        "operatorId": "audio_duration_filter",
+                        "operatorCaseId": "audio_pipeline::005::audio_duration_filter",
+                    },
+                ],
+            },
+            support={
+                "microprofile": "/bench/microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        capture_commands = [
+            command
+            for command in executor.commands
+            if "--operator audio_duration_filter" in command
+        ]
+        self.assertEqual(len(capture_commands), 2)
+
+    def test_text_fast_profile_prepares_the_configured_text_field_directly(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "text_pipeline": {
+                            "kind": "lance",
+                            "field": "text",
+                            "path": "fixtures/text.lance",
+                            "jsonl_mirror": "fixtures/text.jsonl",
+                            "rows": 50,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {"text_chunk_mapper": 100}
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "text_pipeline",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "text_chunk_mapper",
+                        "operatorCaseId": "text_pipeline::000::text_chunk_mapper",
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        joined = "\n".join(executor.commands)
+        self.assertIn("--operator identity", joined)
+        self.assertIn("--field text", joined)
+        self.assertNotIn("--operator pdf_table_extract_mapper", joined)
+        self.assertIn("PYTHONPATH=/opt/volc_operator_sim", joined)
+        self.assertIn("perf-report-period-resolved.txt", joined)
+
+    def test_pdf_fast_profile_preparation_imports_project_operators(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "pdf_pipeline": {
+                            "kind": "jsonl",
+                            "path": "fixtures/pdf.jsonl",
+                            "manifest_path": "fixtures/pdf.jsonl",
+                            "rows": 4,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {"bge_vectorize_mapper": 32}
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "pdf_pipeline",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "bge_vectorize_mapper",
+                        "operatorCaseId": "pdf_pipeline::004::bge_vectorize_mapper",
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/frozen_microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        prepare_command = next(
+            command for command in executor.commands if "--output-json" in command
+        )
+        self.assertIn("--operator pdf_table_extract_mapper", prepare_command)
+        self.assertIn("PYTHONPATH=/opt/volc_operator_sim", prepare_command)
+
+    def test_media_fast_profile_uses_frozen_paths_and_task_params(self) -> None:
+        settings = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "inputOverrides": {
+                        "image_pipeline": {
+                            "kind": "file_manifest",
+                            "field": "file_path",
+                            "path": "fixtures/image.jsonl",
+                            "manifest_path": "fixtures/image.jsonl",
+                            "rows": 5000,
+                        }
+                    },
+                    "contextPerf": {
+                        "fastOperatorCalls": {"image_size_filter": 100000}
+                    },
+                }
+            },
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+        executor = FakeExecutor()
+
+        _run_context_fast_operator_profiles(
+            executor=executor,
+            settings=settings,
+            remote_root="/bench/run/arm",
+            plan={"runId": "run-1"},
+            task={
+                "pipelineId": "image_pipeline",
+                "modality": "image",
+                "engines": ["daft_ray"],
+                "operators": [
+                    {
+                        "operatorId": "image_size_filter",
+                        "operatorCaseId": "image_pipeline::003::image_size_filter",
+                        "params": {"min_size": "1B", "max_size": "20MB"},
+                    }
+                ],
+            },
+            support={
+                "microprofile": "/bench/frozen_microprofile.py",
+                "symbol_env": "/bench/perf_symbol_env.sh",
+                "symbolizer": "/bench/perf_symbol_bundle.py",
+            },
+        )
+
+        joined = "\n".join(executor.commands)
+        self.assertIn("--operator identity", joined)
+        self.assertNotIn("--operator pdf_table_extract_mapper", joined)
+        self.assertIn("--params-json", joined)
+        self.assertIn("min_size", joined)
+        self.assertIn("VOLC_MEDIA_DISABLE_CACHE=1", joined)
+        self.assertIn("trap ", joined)
+        self.assertIn('rm -rf -- "$VOLC_MEDIA_DERIVED_ROOT"', joined)
+
+    def test_overlay_capture_isolates_and_cleans_datajuicer_intermediates(self) -> None:
+        settings = _load_settings(
+            {"operatorAnalysis": {}},
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+
+        command = _capture_overlay_command(
+            settings=settings,
+            remote_out="/bench/run/arm/pipeline_e2e",
+            task_path="/bench/run/overlays/audio.json",
+            engine="datajuicer_native",
+            profile="{}",
+            case="audio_asr_prep_canonical",
+            mode="timing",
+            scope="pipeline_e2e",
+        )
+
+        self.assertIn("DJ_PRODUCED_DATA_DIR=", command)
+        self.assertIn("VOLC_MEDIA_DERIVED_ROOT=", command)
+        self.assertIn(
+            "/bench/run/arm/pipeline_e2e/_intermediate/"
+            "audio_asr_prep_canonical__datajuicer_native",
+            command,
+        )
+        self.assertIn("trap", command)
+        self.assertIn("rm -rf --", command)
+
+    def test_overlay_capture_prefers_tools_from_the_selected_conda_environment(self) -> None:
+        """External tools must match the libraries prepended by bench_capture."""
+
+        settings = _load_settings(
+            {"operatorAnalysis": {}},
+            {"software": {"volcOperatorSimRevision": REVISION}},
+            platform="arm",
+        )
+
+        command = _capture_overlay_command(
+            settings=settings,
+            remote_out="/bench/run/arm/pipeline_context",
+            task_path="/bench/run/overlays/pdf.json",
+            engine="daft_ray",
+            profile="{}",
+            case="pipeline_context__pipeline_pdf_full_min__daft_ray",
+            mode="perfrecord",
+            scope="pipeline_context",
+        )
+
+        self.assertIn(
+            "export PATH=/opt/conda/envs/xarch/bin:/opt/conda/bin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin && cd /opt/volc_operator_sim",
+            command,
+        )
+        self.assertIn("PERF_EXEC_PATH=/opt/conda/envs/xarch/bin", command)
+
     def test_single_pass_context_perf_marks_redundant_scopes_skipped(self) -> None:
         settings = _load_settings(
             {
@@ -292,6 +794,42 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
                 for value in markers.values()
             )
         )
+
+    def test_disabled_isolated_timing_skips_without_remote_archive_or_fetch(self) -> None:
+        executor = FakeExecutor()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = _write_volc_project(root / "project")
+            project.write_text(
+                project.read_text(encoding="utf-8").replace(
+                    "    isolatedTiming: true\n",
+                    "    contextPerf:\n"
+                    "      enabled: true\n"
+                    "      splitByOperatorBoundary: true\n"
+                    "    isolatedTiming: false\n",
+                ),
+                encoding="utf-8",
+            )
+            run_dir = root / "run"
+
+            with patch(
+                "pyframework_pipeline.remote.build_executor", return_value=executor
+            ):
+                VolcOperatorSimAdapter().collect_operator_timing(
+                    project, run_dir, "arm", force=True
+                )
+
+            skipped = json.loads(
+                (
+                    run_dir
+                    / "arm/operators/raw/operator_case_e2e/SKIPPED.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["measurementPolicy"], "single_pass_context_perf")
+        self.assertEqual(executor.fetches, [])
+        self.assertNotIn("PYFRAMEWORK_SCOPE_ARCHIVE", "\n".join(executor.commands))
 
     def test_thin_context_transfer_keeps_host_perf_and_skips_bulk_outputs(self) -> None:
         command = _remote_thin_context_view_command(
@@ -339,6 +877,46 @@ class VolcOperatorSimAcquisitionTest(unittest.TestCase):
         )
 
         self.assertNotEqual(first_id, second_id)
+
+    def test_remote_run_identity_ignores_nonsemantic_fast_sample_budget(self) -> None:
+        common = {"software": {"volcOperatorSimRevision": REVISION}}
+        first = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "contextPerf": {
+                        "fastOperatorCalls": {"clean_html_mapper": 1000}
+                    }
+                }
+            },
+            common,
+            platform="arm",
+        )
+        second = _load_settings(
+            {
+                "operatorAnalysis": {
+                    "contextPerf": {
+                        "fastOperatorCalls": {"clean_html_mapper": 2000}
+                    }
+                }
+            },
+            common,
+            platform="arm",
+        )
+
+        first_id = _stable_run_id(
+            Path("run"),
+            "arm",
+            first,
+            environment_fingerprint_sha256="e" * 64,
+        )
+        second_id = _stable_run_id(
+            Path("run"),
+            "arm",
+            second,
+            environment_fingerprint_sha256="e" * 64,
+        )
+
+        self.assertEqual(first_id, second_id)
 
     def test_profile_cpu_envelope_is_restored_after_the_perf_command(self) -> None:
         settings = _load_settings(

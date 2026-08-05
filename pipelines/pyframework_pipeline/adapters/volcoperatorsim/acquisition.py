@@ -302,6 +302,25 @@ def collect_volc_operator_timing(
     context = _prepare_volc_stage(project_path, run_dir, platform)
     settings, executor, plan, task_documents = context[1:5]
     platform_dir, remote_root, local_raw = context[5:8]
+    if not settings.operator_enabled or not settings.isolated_timing:
+        if settings.context_perf_enabled and settings.context_perf_split:
+            _write_context_perf_skip_markers(platform_dir, settings)
+        else:
+            _write_json(
+                output / "SKIPPED.json",
+                {
+                    "schemaVersion": 1,
+                    "scope": "operator_case_e2e",
+                    "status": "skipped",
+                    "measurementPolicy": "isolated_timing_disabled",
+                    "reason": (
+                        "Operator analysis is disabled."
+                        if not settings.operator_enabled
+                        else "isolatedTiming is disabled for this project."
+                    ),
+                },
+            )
+        return output
     recover_remote = _should_recover_remote(
         executor, remote_root, local_raw, "operator_case_e2e", force=force
     )
@@ -397,24 +416,39 @@ def collect_volc_operator_profiles(
                 platform_dir=platform_dir,
                 settings=settings,
             )
+            completed_windows = _read_completed_capture_cases(
+                executor,
+                f"{remote_root}/operator_case_perf",
+            )
             for task in plan["tasks"]:
                 pipeline_id = str(task["pipelineId"])
                 for engine_value in task["engines"]:
                     engine = str(engine_value)
-                    _run_checked(
-                        executor,
-                        _context_perf_split_command(
-                            settings=settings,
-                            remote_root=remote_root,
-                            plan_path=support["plan"],
-                            splitter_path=support["splitter"],
-                            symbolizer_path=support["symbolizer"],
-                            pipeline_id=pipeline_id,
-                            engine=engine,
-                        ),
-                        scope="operator_case_perf",
-                        timeout=settings.timeout,
-                    )
+                    if _context_perf_windows_complete(
+                        task,
+                        engine,
+                        completed_windows,
+                    ):
+                        logger.info(
+                            "Reusing complete context perf windows for %s/%s",
+                            pipeline_id,
+                            engine,
+                        )
+                    else:
+                        _run_checked(
+                            executor,
+                            _context_perf_split_command(
+                                settings=settings,
+                                remote_root=remote_root,
+                                plan_path=support["plan"],
+                                splitter_path=support["splitter"],
+                                symbolizer_path=support["symbolizer"],
+                                pipeline_id=pipeline_id,
+                                engine=engine,
+                            ),
+                            scope="operator_case_perf",
+                            timeout=settings.timeout,
+                        )
                 _run_context_fast_operator_profiles(
                     executor=executor,
                     settings=settings,
@@ -1394,13 +1428,6 @@ def _stable_run_id(
             str(settings.context_perf_enabled),
             str(settings.context_perf_split),
             str(settings.context_perf_frequency),
-            str(settings.fast_operator_min_samples),
-            json.dumps(
-                settings.context_fast_operator_calls or {},
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
             environment_fingerprint_sha256,
         )
     )
@@ -1562,7 +1589,7 @@ root=Path(sys.argv[1])
 identity_policy=sys.argv[2]
 records={}
 def record(case,engine):
-    return records.setdefault((case,engine),{"case":case,"engine":engine,"ok":False,"perfData":False,"cpuSvg":False,"annotate":False,"symbolized":False,"_artifactMtime":-1.0})
+    return records.setdefault((case,engine),{"case":case,"engine":engine,"ok":False,"perfData":False,"cpuSvg":False,"annotate":False,"symbolized":False,"sampleCount":0,"_artifactMtime":-1.0})
 if root.is_dir():
     for path in root.rglob("summary.json"):
         try:
@@ -1594,6 +1621,18 @@ if root.is_dir():
                 resolution_payload.get("status")=="complete"
                 and resolution_payload.get("identityPolicy")==identity_policy
             )
+            current["sampleCount"]=0
+            if resolved_report.is_file():
+                for line in resolved_report.read_text(encoding="utf-8",errors="replace").splitlines():
+                    parts=line.split("|")
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        current["sampleCount"] += int(parts[2].strip())
+                    except ValueError:
+                        continue
+            if current["perfData"] and current["symbolized"]:
+                current["ok"] = True
     for path in root.rglob("flamegraph-metadata.json"):
         try:
             payload=json.loads(path.read_text(encoding="utf-8"))
@@ -1862,6 +1901,31 @@ def _host_input_path(settings: VolcAcquisitionSettings, value: str) -> str:
     return path if path.startswith("/") else f"{settings.host_data_root}/{path}"
 
 
+def _context_perf_windows_complete(
+    task: Mapping[str, Any],
+    engine: str,
+    inventory: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> bool:
+    expected: list[tuple[str, str]] = []
+    for operator in task.get("operators") or []:
+        if not isinstance(operator, Mapping):
+            continue
+        case_id = str(operator.get("operatorCaseId") or "")
+        if not case_id:
+            continue
+        case_hash = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:12]
+        expected.append(
+            (
+                f"operator_case_perf__{case_hash}__context_window_001",
+                engine,
+            )
+        )
+    return bool(expected) and all(
+        (inventory.get(key) or {}).get("symbolized") is True
+        for key in expected
+    )
+
+
 def _run_context_fast_operator_profiles(
     *,
     executor: Any,
@@ -1875,11 +1939,39 @@ def _run_context_fast_operator_profiles(
     if not calls_by_operator:
         return
     pipeline_id = str(task["pipelineId"])
+    operators_by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for item in task.get("operators") or []:
+        if not isinstance(item, Mapping):
+            continue
+        operators_by_id.setdefault(
+            str(item.get("operatorId") or ""), []
+        ).append(item)
+    selected_calls = {
+        operator_id: total_calls
+        for operator_id, total_calls in calls_by_operator.items()
+        if operator_id in operators_by_id
+    }
+    if not selected_calls:
+        return
+    completed_fast_cases = _read_completed_capture_cases(
+        executor,
+        f"{remote_root}/operator_case_perf",
+    )
     input_spec = (settings.task_input_overrides or {}).get(pipeline_id) or {}
     source_rows = max(1, int(input_spec.get("rows") or 1))
     manifest = _host_input_path(
         settings,
         str(input_spec.get("jsonl_mirror") or input_spec.get("manifest_path") or ""),
+    )
+    source_field = str(input_spec.get("field") or "file_path")
+    requires_derived_text = any(
+        operator_id in {"text_chunk_mapper", "bge_vectorize_mapper"}
+        for operator_id in selected_calls
+    )
+    prepare_operator = (
+        "pdf_table_extract_mapper"
+        if source_field != "text" and requires_derived_text
+        else "identity"
     )
     work_root = (
         f"{settings.host_data_root}/operator-cache/pyframework/"
@@ -1895,9 +1987,11 @@ def _run_context_fast_operator_profiles(
             shlex.quote(settings.daft_python),
             shlex.quote(support["microprofile"]),
             "--operator",
-            "pdf_table_extract_mapper",
+            shlex.quote(prepare_operator),
             "--manifest",
             shlex.quote(manifest),
+            "--field",
+            shlex.quote(source_field),
             "--limit",
             str(source_rows),
             "--total-calls",
@@ -1912,56 +2006,93 @@ def _run_context_fast_operator_profiles(
         executor,
         _docker_shell(
             settings.container,
-            {"PYFRAMEWORK_SCOPE": "operator_case_perf"},
+            {
+                "PYFRAMEWORK_SCOPE": "operator_case_perf",
+                "PYTHONPATH": _TARGET_ROOT,
+            },
             f"cd {_TARGET_ROOT} && {prepare}",
         ),
         scope="operator_case_perf",
         timeout=settings.timeout,
     )
-    operators = {
-        str(item.get("operatorId") or ""): item
-        for item in task.get("operators") or []
-        if isinstance(item, Mapping)
-    }
-    for operator_id, total_calls in calls_by_operator.items():
-        operator = operators.get(operator_id)
-        if not isinstance(operator, Mapping):
-            raise ValueError(
-                f"fast context perf operator not found in {pipeline_id}: {operator_id}"
-            )
-        case_hash = hashlib.sha256(
-            str(operator["operatorCaseId"]).encode("utf-8")
-        ).hexdigest()[:12]
-        for engine_value in operator.get("engines") or task.get("engines") or []:
-            engine = str(engine_value)
-            case = f"operator_case_perf__{case_hash}__context_fast_001"
-            command = _context_fast_profile_command(
-                settings=settings,
-                remote_root=remote_root,
-                support=support,
-                engine=engine,
-                case=case,
-                operator_id=operator_id,
-                input_json=table_texts,
-                source_rows=source_rows,
-                total_calls=int(total_calls),
-                summary_json=f"{work_root}/{_slug(operator_id)}-summary.json",
-            )
+    for operator_id, total_calls in selected_calls.items():
+        for operator in operators_by_id[operator_id]:
+            case_hash = hashlib.sha256(
+                str(operator["operatorCaseId"]).encode("utf-8")
+            ).hexdigest()[:12]
+            engines = operator.get("engines") or task.get("engines") or []
+            for engine_value in engines:
+                engine = str(engine_value)
+                # Data-Juicer operator boundaries come from log timing and are
+                # intentionally diagnostic-only. More perf samples cannot make
+                # those records formally attributable, so a fast retry would only
+                # extend the run without changing its evidence grade.
+                if engine == "datajuicer_native":
+                    continue
+                case = f"operator_case_perf__{case_hash}__context_fast_001"
+                window_case = (
+                    f"operator_case_perf__{case_hash}__context_window_001"
+                )
+                reusable = None
+                for completed_case in (window_case, case):
+                    completed = completed_fast_cases.get(
+                        (completed_case, engine)
+                    ) or {}
+                    if (
+                        completed.get("symbolized") is True
+                        and int(completed.get("sampleCount") or 0)
+                        >= settings.fast_operator_min_samples
+                    ):
+                        reusable = completed
+                        break
+                if reusable is not None:
+                    logger.info(
+                        "Reusing completed perf profile %s/%s with %s samples",
+                        reusable["case"],
+                        engine,
+                        reusable["sampleCount"],
+                    )
+                    continue
+                command = _context_fast_profile_command(
+                    settings=settings,
+                    remote_root=remote_root,
+                    support=support,
+                    engine=engine,
+                    case=case,
+                    operator_id=operator_id,
+                    input_json=table_texts,
+                    source_rows=source_rows,
+                    total_calls=int(total_calls),
+                    params=operator.get("params") or {},
+                    summary_json=f"{work_root}/{_slug(operator_id)}-summary.json",
+                )
 
-            def run_fast_case() -> bool:
+                def run_fast_case() -> bool:
+                    _run_checked(
+                        executor,
+                        command,
+                        scope="operator_case_perf",
+                        timeout=settings.timeout,
+                    )
+                    return True
+
+                _run_with_profile_cpu_envelope(
+                    executor=executor,
+                    settings=settings,
+                    action=run_fast_case,
+                )
                 _run_checked(
                     executor,
-                    command,
+                    _perf_annotate_command(
+                        settings,
+                        f"{remote_root}/operator_case_perf",
+                        case,
+                        engine,
+                        symbolizer_path=support["symbolizer"],
+                    ),
                     scope="operator_case_perf",
                     timeout=settings.timeout,
                 )
-                return True
-
-            _run_with_profile_cpu_envelope(
-                executor=executor,
-                settings=settings,
-                action=run_fast_case,
-            )
 
 
 def _context_fast_profile_command(
@@ -1975,6 +2106,7 @@ def _context_fast_profile_command(
     input_json: str,
     source_rows: int,
     total_calls: int,
+    params: Mapping[str, Any],
     summary_json: str,
 ) -> str:
     python = _python_for(settings, engine)
@@ -1991,6 +2123,8 @@ def _context_fast_profile_command(
             str(source_rows),
             "--total-calls",
             str(total_calls),
+            "--params-json",
+            shlex.quote(json.dumps(dict(params), sort_keys=True)),
             "--summary-json",
             shlex.quote(summary_json),
         )
@@ -2005,6 +2139,7 @@ def _context_fast_profile_command(
         "PERF_EVENTS": settings.perf_events,
         "PERF_LOCK_PROFILE": "attribution",
         "PYFRAMEWORK_SCOPE": "operator_case_perf",
+        "PYTHONPATH": _TARGET_ROOT,
         "BASH_ENV": support["symbol_env"],
         "PYFRAMEWORK_REAL_PERF": "/usr/bin/perf",
         "PYFRAMEWORK_PERF_SYMBOL_PYTHON": python,
@@ -2012,11 +2147,19 @@ def _context_fast_profile_command(
         "PYFRAMEWORK_PERF_SYMBOL_CACHE": f"{output_root}/_symbol-cache",
         "PYFRAMEWORK_PERF_RECORD_EXTRA": "--buildid-all,--buildid-mmap",
         "PYFRAMEWORK_PERF_MAP_POLL_INTERVAL": "0.005",
+        "VOLC_MEDIA_DERIVED_ROOT": (
+            f"{str(Path(summary_json).parent)}/derived/"
+            f"{_slug(case)}__{_slug(engine)}"
+        ),
+        "VOLC_MEDIA_DISABLE_CACHE": "1",
     }
     return _docker_shell(
         settings.container,
         env,
-        f"cd {_TARGET_ROOT} && bash scripts/capture/bench_capture.sh -- {raw}",
+        (
+            'trap \'rm -rf -- "$VOLC_MEDIA_DERIVED_ROOT"\' EXIT; '
+            f"cd {_TARGET_ROOT} && bash scripts/capture/bench_capture.sh -- {raw}"
+        ),
     )
 
 
@@ -2871,7 +3014,21 @@ def _capture_overlay_command(
     perf_frequency: int | None = None,
 ) -> str:
     python = _python_for(settings, engine)
+    tool_path = ":".join(
+        (
+            str(Path(python).parent),
+            "/opt/conda/bin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        )
+    )
     runner_dir = f"{remote_out}/runner/{_slug(case)}"
+    produced_data_dir = (
+        f"{remote_out}/_intermediate/{_slug(case)}__{_slug(engine)}"
+    )
     raw = " ".join(
         (
             shlex.quote(python),
@@ -2890,6 +3047,11 @@ def _capture_overlay_command(
     )
     env = {
         "VOLC_DE_BENCH_ROOT": settings.host_data_root,
+        # bench_capture prepends the selected Conda environment's lib directory.
+        # Put the matching bin directory first as well: otherwise system tools
+        # such as /usr/bin/tesseract can load Conda libcurl/libstdc++ and fail
+        # with unresolved symbols during perf collection.
+        "PATH": tool_path,
         "ENGINE": engine,
         "PY": python,
         "SAMPLER_PY": python,
@@ -2901,6 +3063,12 @@ def _capture_overlay_command(
         "PERF_EVENTS": settings.perf_events,
         "PERF_LOCK_PROFILE": "attribution",
         "PYFRAMEWORK_SCOPE": scope,
+        "DJ_PRODUCED_DATA_DIR": produced_data_dir,
+        # Media stand-ins used to write deterministic outputs beside the
+        # frozen source and reuse them in later E2E/context passes.  Keep all
+        # derived media inside this case-scoped directory instead: the shell
+        # recreates it before capture and removes it on exit.
+        "VOLC_MEDIA_DERIVED_ROOT": produced_data_dir,
     }
     if mode == "perfrecord":
         overlay_dir = str(Path(task_path).parent)
@@ -2919,6 +3087,10 @@ def _capture_overlay_command(
                     "--buildid-all,--buildid-mmap"
                 ),
                 "PYFRAMEWORK_PERF_MAP_POLL_INTERVAL": "0.005",
+                # perf prepends $PERF_EXEC_PATH and /usr/bin to the sampled
+                # process PATH.  Pin it to the matching Conda bin so Daft/Ray
+                # workers keep the compatible tesseract/ffmpeg executables.
+                "PERF_EXEC_PATH": str(Path(python).parent),
             }
         )
     validate_program = r'''import json,sys
@@ -2966,8 +3138,19 @@ os.replace(temporary,path)
             f"{shlex.quote(python)} -c {shlex.quote(clock_program)} "
             f"{shlex.quote(clock_path)} && "
         )
+    quoted_produced_data_dir = shlex.quote(produced_data_dir)
+    cleanup_produced_data = shlex.quote(
+        f"rm -rf -- {quoted_produced_data_dir}"
+    )
     shell = (
-        f"cd {_TARGET_ROOT} && {clock_prefix}{capture} -- {raw}; "
+        # ``bash -l`` resets PATH after docker applies ``-e PATH=...``.  Export
+        # it inside the login shell so subprocess tools match PY/PYENV_LIB.
+        f"export PATH={shlex.quote(tool_path)} && "
+        f"cd {_TARGET_ROOT} && "
+        f"rm -rf -- {quoted_produced_data_dir} && "
+        f"mkdir -p {quoted_produced_data_dir} && "
+        f"trap {cleanup_produced_data} EXIT; "
+        f"{clock_prefix}{capture} -- {raw}; "
         "capture_rc=$?; "
         'if [ "$capture_rc" -ne 0 ]; then exit "$capture_rc"; fi; '
         f"{shlex.quote(python)} -c {shlex.quote(validate_program)} "

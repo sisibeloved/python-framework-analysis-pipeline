@@ -136,6 +136,29 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
             "^[0-9a-fA-F]{64}$",
         )
 
+    def test_reference_environment_includes_audio_row_isolation_fix(self) -> None:
+        from pyframework_pipeline.environment.parser import load_environment_yaml
+
+        environment = load_environment_yaml(
+            REPO_ROOT
+            / "projects"
+            / "volc-operator-sim-reference"
+            / "environment.yaml.example"
+        )
+        software = environment["software"]
+
+        self.assertEqual(
+            software["volcOperatorSimRevision"],
+            "c0c52fd514510bc223d76767e55bcefbc190033c",
+        )
+        self.assertEqual(
+            software["volcOperatorSimImages"],
+            {
+                "arm": "volc-operator-sim-bench:c0c52fd5-aarch64",
+                "x86": "volc-operator-sim-bench:c0c52fd5-x86_64",
+            },
+        )
+
     def test_versioned_reference_project_is_valid(self) -> None:
         from pyframework_pipeline.config import validate_pipeline_config
 
@@ -169,6 +192,19 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
         )
         overrides = analysis["inputOverrides"]
         self.assertEqual(
+            overrides["pipeline_text_fineweb_full_min"],
+            {
+                "kind": "lance",
+                "field": "text",
+                "path": "fixtures/text/scale/fineweb_edu_50k_p4/dataset_p4.lance",
+                "jsonl_mirror": "fixtures/text/scale/fineweb_edu_50k_p4/dataset.jsonl",
+                "manifest_path": "fixtures/text/scale/fineweb_edu_50k_p4/fixture-manifest.json",
+                "fixture_id": "fineweb_edu_50k_p4",
+                "rows": 50000,
+                "input_fingerprint": "sha256:586d8cac2e8665beeae328b572b3e0c262fc007d6bf9685676d7a2d31c67a6ec",
+            },
+        )
+        self.assertEqual(
             overrides["video_scene_split_etl"]["source_dataset"],
             "panda_70m",
         )
@@ -176,14 +212,150 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
             overrides["video_scene_split_etl"]["path"],
             "fixtures/canonical/panda_70m_video.lance",
         )
+        self.assertEqual(overrides["video_scene_split_etl"]["rows"], 8)
+        self.assertEqual(
+            overrides["video_scene_split_etl"]["input_fingerprint"],
+            "sha256:cad57d309f3fcadfbc721887eac25766d4d5b63053d7bc89b2c25a4d7ae306e3",
+        )
         self.assertEqual(
             overrides["audio_asr_prep_canonical"]["source_dataset"],
             "common_voice",
         )
         self.assertEqual(
             overrides["audio_asr_prep_canonical"]["path"],
-            "fixtures/canonical/common_voice_audio.lance",
+            "fixtures/audio/scale/common_voice_cv26_en_test_512/common_voice_cv26_en_test_512_audio.lance",
         )
+        self.assertEqual(overrides["audio_asr_prep_canonical"]["rows"], 512)
+        self.assertEqual(
+            overrides["audio_asr_prep_canonical"]["input_fingerprint"],
+            "sha256:b6114e0eb8ca83265cb52732651396b8feb4ab86e0770369e34375b75bee5e4c",
+        )
+        self.assertNotIn(
+            "manifest_path",
+            overrides["audio_asr_prep_canonical"],
+            "the row-oriented JSONL source is not a single JSON fixture manifest",
+        )
+        self.assertEqual(
+            overrides["pipeline_pdf_full_min"],
+            {
+                "kind": "lance",
+                "field": "file_path",
+                "path": "fixtures/pdf/scale/pmc_pdf_hash4/pdfs_p4.lance",
+                "jsonl_mirror": "fixtures/pdf/scale/pmc_pdf_hash4/manifest.jsonl",
+                "manifest_path": "fixtures/pdf/scale/pmc_pdf_hash4/fixture-manifest.json",
+                "fixture_id": "pmc_pdf_hash4",
+                "rows": 4,
+                "input_fingerprint": "sha256:2ae67663b803198f9e6e22671ae9067b227db4e3763783d3652d8f6be4a34fa4",
+            },
+        )
+        self.assertEqual(
+            overrides["pipeline_ad_nuscenes_min"],
+            {
+                "kind": "file_manifest",
+                "field": "file_path",
+                "path": "fixtures/ad/scale/nuscenes_cam_front_5m/manifest.jsonl",
+                "manifest_path": "fixtures/ad/scale/nuscenes_cam_front_5m/manifest.jsonl",
+                "fixture_id": "nuscenes_cam_front_5m",
+                "rows": 5000000,
+                "input_fingerprint": "sha256:891fba38c95045eb729daf183b6463192e23ec4937ea424ee9292806cbec2500",
+            },
+        )
+        self.assertTrue(analysis["contextPerf"]["enabled"])
+        self.assertTrue(analysis["contextPerf"]["splitByOperatorBoundary"])
+        self.assertEqual(analysis["contextPerf"]["perfFrequency"], 249)
+        self.assertEqual(
+            analysis["contextPerf"]["fastOperatorCalls"]["text_chunk_mapper"],
+            150000,
+        )
+        self.assertEqual(
+            analysis["contextPerf"]["fastOperatorCalls"]["image_size_filter"],
+            1800000,
+        )
+        self.assertEqual(
+            analysis["contextPerf"]["fastOperatorCalls"]["video_resize_resolution_mapper"],
+            640,
+        )
+        self.assertEqual(
+            analysis["contextPerf"]["fastOperatorCalls"]["video_duration_filter"],
+            400,
+        )
+        self.assertFalse(analysis["isolatedTiming"])
+        self.assertEqual(analysis["warmup"], 0)
+        self.assertEqual(analysis["rounds"], 1)
+        self.assertTrue(analysis["unblockPerf"])
+        self.assertTrue(analysis["representativeProfile"])
+
+    def test_reference_text_fixture_is_bounded_for_thirty_minute_arm_run(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        text = payload["workload"]["operatorAnalysis"]["inputOverrides"][
+            "pipeline_text_fineweb_full_min"
+        ]
+
+        self.assertEqual(text["fixture_id"], "fineweb_edu_50k_p4")
+        self.assertEqual(text["rows"], 50000)
+        self.assertIn("fineweb_edu_50k_p4", text["path"])
+
+    def test_reference_text_fast_profile_meets_the_sample_floor(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        context_perf = payload["workload"]["operatorAnalysis"]["contextPerf"]
+
+        fast_calls = context_perf["fastOperatorCalls"]
+
+        self.assertEqual(fast_calls["clean_html_mapper"], 3500000)
+        self.assertEqual(fast_calls["clean_links_mapper"], 125000)
+        self.assertEqual(fast_calls["clean_copyright_mapper"], 100000)
+        self.assertEqual(fast_calls["whitespace_normalization_mapper"], 70000)
+        self.assertEqual(fast_calls["text_length_filter"], 20000000)
+        self.assertEqual(fast_calls["document_deduplicator"], 12)
+        self.assertEqual(fast_calls["text_chunk_mapper"], 150000)
+
+    def test_reference_video_fast_profiles_have_blue98_sample_margin(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        fast_calls = payload["workload"]["operatorAnalysis"]["contextPerf"]["fastOperatorCalls"]
+
+        self.assertEqual(fast_calls["video_resize_resolution_mapper"], 640)
+        self.assertEqual(fast_calls["video_duration_filter"], 400)
+
+    def test_reference_audio_fast_profile_has_blue98_sample_margin(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        fast_calls = payload["workload"]["operatorAnalysis"]["contextPerf"]["fastOperatorCalls"]
+
+        self.assertEqual(fast_calls["audio_duration_filter"], 1536)
+
+    def test_reference_image_fast_profiles_have_blue98_sample_margin(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+        fast_calls = payload["workload"]["operatorAnalysis"]["contextPerf"]["fastOperatorCalls"]
+
+        self.assertEqual(fast_calls["download_file_mapper"], 4000000)
+        self.assertEqual(fast_calls["image_shape_filter"], 6000)
+        self.assertEqual(fast_calls["image_aspect_ratio_filter"], 6000)
+        self.assertEqual(fast_calls["image_size_filter"], 1800000)
+        self.assertEqual(fast_calls["image_aesthetics_filter"], 3600000)
+        self.assertEqual(fast_calls["image_text_similarity_filter"], 3600000)
+        self.assertEqual(fast_calls["image_clip_vectorize_mapper"], 8000000)
+
+    def test_reference_project_uses_bounded_context_perf_frequency(self) -> None:
+        from pyframework_pipeline.config import load_project_config
+
+        project = REPO_ROOT / "projects" / "volc-operator-sim-reference" / "project.yaml"
+        payload = load_project_config(project)
+
+        self.assertEqual(payload["workload"]["operatorAnalysis"]["contextPerf"]["perfFrequency"], 249)
 
     def test_extended_project_preserves_the_original_fourteen_pipelines(self) -> None:
         from pyframework_pipeline.config import load_project_config
@@ -489,9 +661,19 @@ class VolcEnvironmentPlanTest(unittest.TestCase):
             "-e LD_PRELOAD=/opt/conda/envs/xarch/lib/libstdc++.so.6",
             start["command"],
         )
+        self.assertIn(
+            "-e PATH=/opt/conda/envs/xarch/bin:/opt/conda/bin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin",
+            start["command"],
+        )
         self.assertIn("-e CONDA_PREFIX=/opt/conda", start["command"])
         self.assertIn("--cpuset-cpus 4-7", start["command"])
         self.assertIn("--cpuset-mems 0", start["command"])
+        self.assertIn(
+            "docker update --cpuset-cpus 4-7 --cpuset-mems 0 "
+            "volc-operator-sim-bench",
+            start["command"],
+        )
         self.assertIn("--ulimit nofile=65536:524288", start["command"])
         self.assertIn("-e PERF_LOCK_NUMA_POLICY=cpus=4-7,mems=0", start["command"])
         self.assertIn("-e PERF_LOCK_VIRTUALIZATION=bare-metal", start["command"])

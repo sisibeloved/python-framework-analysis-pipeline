@@ -138,6 +138,24 @@ def _runner_result(context_root: Path, pipeline_id: str, engine: str) -> Path:
     return _latest(candidates, "pipeline-context runner result")
 
 
+def _context_perf_data(
+    context_root: Path, pipeline_id: str, engine: str
+) -> Path:
+    """Select the capture produced by this exact pipeline/engine pair."""
+
+    expected_case = f"pipeline_context__{pipeline_id}__{engine}"
+    candidates = [
+        path
+        for path in context_root.glob("**/perf.data")
+        if path.parent.name == expected_case
+        and path.parent.parent.name == engine
+    ]
+    return _latest(
+        candidates,
+        f"context perf.data for {pipeline_id}/{engine}",
+    )
+
+
 def _sample_count(report: Path) -> int:
     count = 0
     for line in report.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -259,7 +277,7 @@ def split_context_perf(
         pipeline_id=pipeline_id,
         engine=engine,
     )
-    perf_data = _latest(list(context_root.glob("**/perf.data")), "context perf.data")
+    perf_data = _context_perf_data(context_root, pipeline_id, engine)
     dso_manifest = perf_data.with_name("perf-dso-manifest.json")
     if not dso_manifest.is_file():
         raise FileNotFoundError(dso_manifest)

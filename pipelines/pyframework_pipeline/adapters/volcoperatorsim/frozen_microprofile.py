@@ -43,7 +43,11 @@ def _atomic_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def _resolve(operator: str) -> Callable[[str], Any]:
+def _resolve(
+    operator: str, params: dict[str, Any] | None = None
+) -> Callable[[str], Any]:
+    if operator == "identity":
+        return lambda value: value
     if operator == "pdf_parse_mapper":
         from ops.pdf_ops import dj_pdf_parse_real
 
@@ -62,7 +66,19 @@ def _resolve(operator: str) -> Callable[[str], Any]:
         return lambda text: dj_bge_vectorize_vec(
             text, dim=384, model_name="all-MiniLM-L6-v2"
         )
-    raise ValueError(f"unsupported frozen microprofile operator: {operator}")
+    from registry import OPERATOR_CATALOG, resolve_filter_fn, resolve_mapper_fn
+
+    metadata = OPERATOR_CATALOG.get(operator)
+    if metadata is None:
+        raise ValueError(f"unsupported frozen microprofile operator: {operator}")
+    if metadata.category == "mapper":
+        return resolve_mapper_fn(operator, params or {})
+    if metadata.category == "filter":
+        return resolve_filter_fn(operator, params or {})
+    raise ValueError(
+        "unsupported frozen microprofile operator category: "
+        f"{operator} ({metadata.category})"
+    )
 
 
 def _load_values(args: argparse.Namespace) -> list[str]:
@@ -78,28 +94,58 @@ def _load_values(args: argparse.Namespace) -> list[str]:
     return values
 
 
+def _run_document_deduplicator(
+    source: list[str], *, repetitions: int
+) -> int:
+    """Replay Volc's real Daft exact-dedup barrier on the frozen text rows."""
+    import daft
+    from runner.pipeline_builder import _apply_deduplicator
+
+    checksum = 0
+    for _ in range(repetitions):
+        frame = daft.from_pydict({"text": source})
+        deduplicated, _ = _apply_deduplicator(
+            frame,
+            "text",
+            {"dj_ops": "document_deduplicator"},
+        )
+        checksum += int(deduplicated.count_rows())
+    return checksum
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     source = _load_values(args)
-    values = cycle_items(source, total=args.total_calls)
-    function = _resolve(args.operator)
+    params = json.loads(args.params_json or "{}")
+    if not isinstance(params, dict):
+        raise ValueError("--params-json must contain a JSON object")
     outputs: list[Any] = []
     checksum = 0
     started = time.perf_counter()
-    for value in values:
-        output = function(value)
-        checksum += len(output) if hasattr(output, "__len__") else 1
-        if args.output_json and len(outputs) < len(source):
-            outputs.append(output)
+    if args.operator == "document_deduplicator":
+        checksum = _run_document_deduplicator(
+            source,
+            repetitions=args.total_calls,
+        )
+        capture_mode = "frozen_daft_global_deduplicator"
+    else:
+        function = _resolve(args.operator, params)
+        for index in range(args.total_calls):
+            value = source[index % len(source)]
+            output = function(value)
+            checksum += len(output) if hasattr(output, "__len__") else 1
+            if args.output_json and len(outputs) < len(source):
+                outputs.append(output)
+        capture_mode = "frozen_operator_microprofile"
     elapsed = time.perf_counter() - started
     if args.output_json:
         _atomic_json(args.output_json, outputs)
     result = {
         "operator": args.operator,
         "sourceRows": len(source),
-        "totalCalls": len(values),
+        "totalCalls": args.total_calls,
         "elapsedSeconds": elapsed,
         "checksum": checksum,
-        "captureMode": "frozen_operator_microprofile",
+        "captureMode": capture_mode,
     }
     if args.summary_json:
         _atomic_json(args.summary_json, result)
@@ -115,6 +161,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--field", default="file_path")
     parser.add_argument("--limit", type=int, default=16)
     parser.add_argument("--total-calls", type=int, required=True)
+    parser.add_argument("--params-json", default="{}")
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--summary-json", type=Path)
     return parser

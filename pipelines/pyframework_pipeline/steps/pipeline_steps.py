@@ -157,6 +157,7 @@ class BackfillRunStep:
             ctx.project_path,
             ctx.run_dir,
             force=_force(ctx),
+            platforms=ctx.config.get("platforms"),
         )
 
 
@@ -169,7 +170,11 @@ class PlatformCompareStep:
     def run(self, ctx: RunContext) -> None:
         from .. import orchestrator
 
-        orchestrator._run_compare(ctx.project_path, ctx.run_dir)
+        orchestrator._run_compare(
+            ctx.project_path,
+            ctx.run_dir,
+            platforms=ctx.config.get("platforms"),
+        )
 
 
 @register_step

@@ -67,6 +67,9 @@ _RAW_EVENT_FILTER = (
     r"PERF_RECORD_(SAMPLE|MMAP2|FORK|EXIT|COMM)"
 )
 _RAW_SAMPLE_INDEX_CACHE_SCHEMA_VERSION = 2
+_RUNTIME_CONTROL_MAPPING_PREFIXES = (
+    "/memfd:runc_cloned:",
+)
 
 
 @dataclass(frozen=True)
@@ -331,6 +334,7 @@ class DeletedMappingCollector:
         self.object_root = cache_root / "objects"
         self.object_root.mkdir(parents=True, exist_ok=True)
         self.objects: dict[str, dict[str, Any]] = {}
+        self._objects_by_file_identity: dict[tuple[str, int, str], str] = {}
         self.mappings: dict[tuple[int, int, int, int, int], dict[str, Any]] = {}
         self.errors: list[dict[str, Any]] = []
         self._error_keys: set[tuple[int, int, int, str]] = set()
@@ -359,6 +363,15 @@ class DeletedMappingCollector:
             self.processes_observed.add(pid)
             tids = _thread_ids(self.proc_root, pid)
             for mapping in parse_proc_maps(text, pid=pid, tids=tids):
+                # docker exec briefly creates an unlinked runc trampoline in
+                # the container PID namespace.  The collector intentionally
+                # scans that whole namespace to follow reparented Ray workers,
+                # but this control-process mapping is not sampled workload
+                # code and can disappear before /proc/PID/map_files is read.
+                if mapping.deleted and mapping.path.startswith(
+                    _RUNTIME_CONTROL_MAPPING_PREFIXES
+                ):
+                    continue
                 key = (
                     mapping.pid,
                     mapping.start,
@@ -394,11 +407,19 @@ class DeletedMappingCollector:
         return self._capture_source(source, mapping)
 
     def _capture_source(self, source: Path, mapping: ProcMap) -> str:
+        file_identity = (mapping.device, mapping.inode, mapping.path)
+        existing_object_id = self._objects_by_file_identity.get(file_identity)
+        if existing_object_id and existing_object_id in self.objects:
+            return existing_object_id
         temporary = self.object_root / (
             f".pid-{mapping.pid}-{mapping.start:x}-{mapping.end:x}.partial"
         )
         try:
             with source.open("rb") as reader, temporary.open("wb") as writer:
+                magic = reader.read(4)
+                if magic != b"\x7fELF":
+                    raise ValueError(f"not an ELF object: {source}")
+                writer.write(magic)
                 shutil.copyfileobj(reader, writer, length=1024 * 1024)
             identity = inspect_elf(temporary)
             object_id = str(identity.pop("objectId"))
@@ -421,6 +442,7 @@ class DeletedMappingCollector:
                 "originalPath": mapping.path,
             }
             self.objects.setdefault(object_id, record)
+            self._objects_by_file_identity[file_identity] = object_id
             return object_id
         except (OSError, ValueError) as exc:
             temporary.unlink(missing_ok=True)
@@ -891,6 +913,51 @@ def _mapping_for_ip_from_index(
     )
 
 
+def _raw_device_key(value: Any) -> tuple[int, int] | None:
+    parts = str(value or "").split(":", 1)
+    try:
+        return (int(parts[0], 16), int(parts[1], 16))
+    except (IndexError, ValueError):
+        return None
+
+
+def _raw_mmap_manifest_index(
+    manifest: Mapping[str, Any],
+) -> dict[
+    tuple[int, int, int, int],
+    tuple[tuple[str, tuple[int, int] | None, int, str], ...],
+]:
+    """Index captured mappings once instead of rescanning a large manifest."""
+
+    objects = manifest.get("objects") or {}
+    result: dict[
+        tuple[int, int, int, int],
+        list[tuple[str, tuple[int, int] | None, int, str]],
+    ] = {}
+    for item in manifest.get("mappings") or ():
+        if not isinstance(item, Mapping) or not item.get("objectId"):
+            continue
+        object_id = str(item["objectId"])
+        object_item = objects.get(object_id) or {}
+        build_id = str(object_item.get("buildId") or "").lower()
+        if not build_id and object_id.startswith("buildid:"):
+            build_id = object_id.split(":", 1)[1].lower()
+        identity = (
+            object_id,
+            _raw_device_key(item.get("device")),
+            _integer(item.get("inode", -1)),
+            build_id,
+        )
+        subjects = {_integer(item.get("pid", -1))}
+        subjects.update(_integer(value) for value in item.get("tids") or ())
+        start = _integer(item.get("start", -1))
+        end = _integer(item.get("end", -1))
+        offset = _integer(item.get("offset", 0))
+        for subject in subjects:
+            result.setdefault((subject, start, end, offset), []).append(identity)
+    return {key: tuple(value) for key, value in result.items()}
+
+
 def _mapping_object_for_raw_mmap(
     manifest: Mapping[str, Any],
     *,
@@ -902,49 +969,33 @@ def _mapping_object_for_raw_mmap(
     device: str = "",
     inode: int | None = None,
     build_id: str = "",
+    mapping_index: Mapping[
+        tuple[int, int, int, int],
+        Sequence[tuple[str, tuple[int, int] | None, int, str]],
+    ]
+    | None = None,
 ) -> str:
     """Return an ELF captured from the exact live procfs mapping, if any."""
 
-    def device_key(value: Any) -> tuple[int, int] | None:
-        parts = str(value or "").split(":", 1)
-        try:
-            return (int(parts[0], 16), int(parts[1], 16))
-        except (IndexError, ValueError):
-            return None
-
-    def object_build_id(object_id: str) -> str:
-        item = (manifest.get("objects") or {}).get(object_id) or {}
-        value = str(item.get("buildId") or "").lower()
-        if not value and object_id.startswith("buildid:"):
-            value = object_id.split(":", 1)[1].lower()
-        return value
-
-    candidates: list[Mapping[str, Any]] = []
-    for item in manifest.get("mappings") or ():
-        if not isinstance(item, Mapping) or not item.get("objectId"):
-            continue
-        mapping_pid = _integer(item.get("pid", -1))
-        mapping_tids = {_integer(value) for value in item.get("tids") or ()}
-        if pid != mapping_pid and tid != mapping_pid and tid not in mapping_tids:
-            continue
-        if (
-            _integer(item.get("start", -1)) == start
-            and _integer(item.get("end", -1)) == end
-            and _integer(item.get("offset", 0)) == offset
-        ):
-            if device and inode is not None:
-                if (
-                    device_key(item.get("device")) != device_key(device)
-                    or _integer(item.get("inode", -1)) != inode
-                ):
-                    continue
-            elif not build_id:
+    exact_index = mapping_index or _raw_mmap_manifest_index(manifest)
+    candidates = {
+        candidate
+        for subject in {pid, tid}
+        for candidate in exact_index.get((subject, start, end, offset), ())
+    }
+    object_ids = set()
+    for object_id, captured_device, captured_inode, captured_build_id in candidates:
+        if device and inode is not None:
+            if (
+                captured_device != _raw_device_key(device)
+                or captured_inode != inode
+            ):
                 continue
-            object_id = str(item["objectId"])
-            if build_id and object_build_id(object_id) != build_id.lower():
-                continue
-            candidates.append(item)
-    object_ids = {str(item["objectId"]) for item in candidates}
+        elif not build_id:
+            continue
+        if build_id and captured_build_id != build_id.lower():
+            continue
+        object_ids.add(object_id)
     return next(iter(object_ids)) if len(object_ids) == 1 else ""
 
 
@@ -986,6 +1037,7 @@ def index_raw_perf_lines(
     process_comms: dict[int, str] = {}
     index: dict[tuple[Any, ...], dict[str, dict[str, int]]] = {}
     captured_mapping_index = _manifest_mapping_index(manifest)
+    raw_mmap_mapping_index = _raw_mmap_manifest_index(manifest)
     captured_mapping_cache: dict[
         tuple[int, int], Mapping[str, Any] | None
     ] = {}
@@ -1074,6 +1126,7 @@ def index_raw_perf_lines(
                 device=raw_device,
                 inode=raw_inode,
                 build_id=raw_build_id,
+                mapping_index=raw_mmap_mapping_index,
             )
             if build_id_match:
                 candidate = f"buildid:{raw_build_id}"
@@ -1580,6 +1633,7 @@ def resolve_period_report(
     ambiguous_count = 0
     details: list[dict[str, Any]] = []
     objects = manifest.get("objects") or {}
+    captured_mapping_index = _manifest_mapping_index(manifest)
     object_ids_by_display: dict[str, set[str]] = {}
     for object_id, item in objects.items():
         if not isinstance(item, Mapping):
@@ -1732,7 +1786,11 @@ def resolve_period_report(
                 next_index += 1
         tid = _report_pid(parts)
         mapping = (
-            _mapping_for_ip(manifest, tid=tid, ip=absolute_ip)
+            _mapping_for_ip_from_index(
+                captured_mapping_index,
+                tid=tid,
+                ip=absolute_ip,
+            )
             if tid is not None and absolute_ip is not None
             else None
         )

@@ -584,13 +584,18 @@ def _execute_step(
         )
 
     elif step_id == "5d":
-        _run_operator_compare(project_path, run_dir)
+        _run_operator_compare(project_path, run_dir, platforms=platforms)
 
     elif step_id == "6":
-        _run_backfill(project_path, run_dir, force=force)
+        _run_backfill(
+            project_path,
+            run_dir,
+            force=force,
+            platforms=platforms,
+        )
 
     elif step_id == "6b":
-        _run_compare(project_path, run_dir)
+        _run_compare(project_path, run_dir, platforms=platforms)
 
     elif step_id == "7":
         _run_bridge_publish(project_path)
@@ -684,7 +689,46 @@ def _run_operator_stage(
     method(project_path, run_dir, platform, force=force)
 
 
-def _run_operator_compare(project_path: Path, run_dir: Path) -> None:
+def _write_cross_platform_skip(
+    output_dir: Path,
+    *,
+    step: str,
+    available_platforms: list[str],
+) -> Path:
+    """Persist why a cross-platform stage was intentionally not applicable."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    marker = output_dir / "SKIPPED.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "status": "skipped",
+                "step": step,
+                "reason": "cross-platform stage requires both ARM and x86",
+                "availablePlatforms": available_platforms,
+                "requiredPlatforms": ["arm", "x86"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    logger.info(
+        "%s skipped: available platforms are %s",
+        step,
+        ", ".join(available_platforms) or "none",
+    )
+    return marker
+
+
+def _run_operator_compare(
+    project_path: Path,
+    run_dir: Path,
+    *,
+    platforms: list[str] | None = None,
+) -> None:
     """Compare normalized operator evidence when the adapter supports it."""
 
     if _framework_id_from_project(project_path) != "volcoperatorsim":
@@ -694,6 +738,20 @@ def _run_operator_compare(project_path: Path, run_dir: Path) -> None:
     from .adapters.volcoperatorsim.operator_compare import (
         compare_operator_platforms,
     )
+
+    selected = list(dict.fromkeys(platforms or ("arm", "x86")))
+    available = [
+        platform
+        for platform in selected
+        if (run_dir / platform / "operators" / "operator-plan.json").is_file()
+    ]
+    if not {"arm", "x86"}.issubset(available):
+        _write_cross_platform_skip(
+            run_dir / "compare" / "operators",
+            step="operator platform compare",
+            available_platforms=available,
+        )
+        return
 
     adapter = get_adapter("volcoperatorsim")
     for platform in ("arm", "x86"):
@@ -1576,14 +1634,26 @@ def _run_acquire_all(
                      f"{len(asm_files)} files" if asm_files else "missing")
 
 
-def _run_backfill(project_path: Path, run_dir: Path, *, force: bool = False) -> None:
+def _run_backfill(
+    project_path: Path,
+    run_dir: Path,
+    *,
+    force: bool = False,
+    platforms: list[str] | None = None,
+) -> None:
     from .config import get_run_config
 
-    run_config = get_run_config(project_path)
-    platforms = run_config.get("platforms", [])
+    if platforms is None:
+        run_config = get_run_config(project_path)
+        platforms = run_config.get("platforms", [])
 
     if len(platforms) < 2:
-        raise StepError("Need at least 2 platforms for backfill")
+        _write_cross_platform_skip(
+            run_dir / "compare" / "backfill",
+            step="cross-platform backfill",
+            available_platforms=list(platforms),
+        )
+        return
 
     arm_dir = run_dir / platforms[0]
     x86_dir = run_dir / platforms[1]
@@ -1611,8 +1681,21 @@ def _run_backfill(project_path: Path, run_dir: Path, *, force: bool = False) -> 
         )
 
 
-def _run_compare(project_path: Path, run_dir: Path) -> None:
+def _run_compare(
+    project_path: Path,
+    run_dir: Path,
+    *,
+    platforms: list[str] | None = None,
+) -> None:
     """Step 6b: run cross-platform comparison using python-performance-kits."""
+    if platforms is not None and len(platforms) < 2:
+        _write_cross_platform_skip(
+            run_dir / "compare",
+            step="platform compare",
+            available_platforms=list(platforms),
+        )
+        return
+
     arm_dir = run_dir / "arm"
     x86_dir = run_dir / "x86"
 

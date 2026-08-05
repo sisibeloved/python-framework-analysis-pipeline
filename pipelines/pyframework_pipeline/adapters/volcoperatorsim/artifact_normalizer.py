@@ -1436,7 +1436,8 @@ def _safe_ratio(numerator: float | None, denominator: float | None) -> float | N
 def _counter_value(value: float | None) -> int | float | None:
     if value is None:
         return None
-    return int(value) if value.is_integer() else value
+    numeric = float(value)
+    return int(numeric) if numeric.is_integer() else numeric
 
 
 def _format_float(value: float) -> str:

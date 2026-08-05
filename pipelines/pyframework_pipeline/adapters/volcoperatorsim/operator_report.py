@@ -746,6 +746,18 @@ def _perf_card_html(
         f"<li><code>{_html(symbol)}</code>{f' · {share * 100:.2f}%' if share is not None else ''}</li>"
         for symbol, share in symbols
     )
+    category_html = "".join(category_rows) or (
+        '<p class="unattributed">无可用 perf 分类样本。</p>'
+    )
+    language_html = "".join(language_rows) or (
+        '<p class="unattributed">无可用语言归因。</p>'
+    )
+    library_html = (
+        f'<ol class="libraries">{library_rows}</ol>'
+        if library_rows
+        else '<p class="unattributed">无可用库归因。</p>'
+    )
+    symbol_html = f'<ol class="symbols">{symbol_rows}</ol>' if symbol_rows else ""
     resolution_html = ""
     if resolution_status:
         before = int(resolution.get("deletedRowsBefore") or 0)
@@ -770,14 +782,14 @@ def _perf_card_html(
         f'<span class="muted">CPU {_html(_format_ns(cpu_ns))} · samples {perf.resources.sample_count if perf else 0}</span></div>'
         f"{resolution_html}"
         '<h4>框架 / 类型分类</h4>'
-        f'{"".join(category_rows) or "<p class=\"unattributed\">无可用 perf 分类样本。</p>"}'
+        f'{category_html}'
         '<h4>语言 / 运行时分布（推断）</h4>'
         '<p class="inference-note">根据共享对象和符号保守推断；未知映射不会强行归类。</p>'
-        f'{"".join(language_rows) or "<p class=\"unattributed\">无可用语言归因。</p>"}'
+        f'{language_html}'
         '<h4>库 / 映射分布</h4>'
-        f'{f"<ol class=\"libraries\">{library_rows}</ol>" if library_rows else "<p class=\"unattributed\">无可用库归因。</p>"}'
+        f'{library_html}'
         '<h4>Top 热点符号</h4>'
-        f'{f"<ol class=\"symbols\">{symbol_rows}</ol>" if symbol_rows else ""}'
+        f'{symbol_html}'
         '</article>'
     )
 

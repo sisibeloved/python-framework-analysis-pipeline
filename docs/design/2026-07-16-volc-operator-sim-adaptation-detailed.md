@@ -38,7 +38,7 @@ Adapter、OperatorAnalysisAdapter、operator case、stage snapshot、perf.data�
 
 ## 0.7 简介
 
-目标仓库基线为 `56d3b6856895427a0519cbaa437d55443fcb578b`。实现不得把目标 operator 或 runner 复制进本项目；允许生成 overlay config、派生 task 和采集 wrapper。
+目标仓库基线为 `c0c52fd514510bc223d76767e55bcefbc190033c`。实现不得把目标 operator 或 runner 复制进本项目；允许生成 overlay config、派生 task 和采集 wrapper。
 
 # 1 上游文档引用
 
@@ -183,10 +183,10 @@ mode: plan-only
 
 software:
   volcOperatorSimRepo: https://gitcode.com/XuanYuL5/volc_operator_sim.git
-  volcOperatorSimRevision: 56d3b6856895427a0519cbaa437d55443fcb578b
+  volcOperatorSimRevision: c0c52fd514510bc223d76767e55bcefbc190033c
   volcOperatorSimImages:
-    arm: volc-operator-sim-bench:56d3b6856895-aarch64
-    x86: volc-operator-sim-bench:56d3b6856895-x86_64
+    arm: volc-operator-sim-bench:c0c52fd51451-aarch64
+    x86: volc-operator-sim-bench:c0c52fd51451-x86_64
   volcOperatorSimContainer: volc-operator-sim-bench
   hostDataRoot: /home/lxy/de_bench_full
   dataSourceManifest: data-sources.json
@@ -322,7 +322,7 @@ ARM/x86 可并行执行 prepare；单 Host 内使用锁串行修改同一 cache 
 
 ```json
 {
-  "sourceRevision": "56d3b6856895427a0519cbaa437d55443fcb578b",
+  "sourceRevision": "c0c52fd514510bc223d76767e55bcefbc190033c",
   "imageId": "sha256:...",
   "containerId": "...",
   "dataManifestSha256": "...",
@@ -576,7 +576,7 @@ plan 先完成全部 snapshot 和 parity，再开始 timing/profile；避免 pro
 {
   "schemaVersion": 1,
   "runId": "...",
-  "sourceRevision": "56d3b6856895427a0519cbaa437d55443fcb578b",
+  "sourceRevision": "c0c52fd514510bc223d76767e55bcefbc190033c",
   "platform": "arm",
   "tasks": [
     {

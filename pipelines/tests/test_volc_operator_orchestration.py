@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from io import StringIO
@@ -70,6 +71,10 @@ class VolcOperatorOrchestrationTest(unittest.TestCase):
             root = Path(tmp)
             project = _write_volc_project(root / "project")
             run_dir = root / "run"
+            for platform in ("arm", "x86"):
+                plan = run_dir / platform / "operators" / "operator-plan.json"
+                plan.parent.mkdir(parents=True)
+                plan.write_text("{}", encoding="utf-8")
             with patch(
                 "pyframework_pipeline.adapters.volcoperatorsim.acquisition_manifest."
                 "build_acquisition_manifest"
@@ -86,11 +91,55 @@ class VolcOperatorOrchestrationTest(unittest.TestCase):
                     "compare_operator_platforms"
                 ) as compare,
             ):
-                _execute_step("5d", project, run_dir, None)
+                _execute_step(
+                    "5d", project, run_dir, None, platforms=["arm", "x86"]
+                )
 
         self.assertEqual(build_manifest.call_count, 2)
         self.assertEqual(normalize.call_count, 2)
         self.assertEqual(compare.call_count, 1)
+
+    def test_cross_platform_steps_skip_cleanly_for_arm_only_run(self) -> None:
+        from pyframework_pipeline.orchestrator import _execute_step
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = _write_volc_project(root / "project")
+            run_dir = root / "run"
+            plan = run_dir / "arm" / "operators" / "operator-plan.json"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("{}", encoding="utf-8")
+
+            with (
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim.adapter."
+                    "VolcOperatorSimAdapter.normalize_operator_artifacts"
+                ) as normalize,
+                patch(
+                    "pyframework_pipeline.adapters.volcoperatorsim.operator_compare."
+                    "compare_operator_platforms"
+                ) as compare,
+            ):
+                for step in ("5d", "6", "6b"):
+                    _execute_step(
+                        step,
+                        project,
+                        run_dir,
+                        None,
+                        platforms=["arm"],
+                    )
+
+            skipped = json.loads(
+                (run_dir / "compare" / "operators" / "SKIPPED.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        normalize.assert_not_called()
+        compare.assert_not_called()
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["availablePlatforms"], ["arm"])
+        self.assertEqual(skipped["requiredPlatforms"], ["arm", "x86"])
 
     def test_5c_1_normalizes_then_writes_readable_report_for_selected_platform(self) -> None:
         from pyframework_pipeline.orchestrator import _execute_step

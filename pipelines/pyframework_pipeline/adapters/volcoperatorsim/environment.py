@@ -138,6 +138,10 @@ class VolcOperatorSimEnvironmentAdapter:
             }
         )
         ld_preload = f"/opt/conda/envs/{xarch}/lib/libstdc++.so.6"
+        tool_path = (
+            f"/opt/conda/envs/{xarch}/bin:/opt/conda/bin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin"
+        )
         config_hash = hashlib.sha256(
             json.dumps(
                 {
@@ -154,6 +158,7 @@ class VolcOperatorSimEnvironmentAdapter:
                     "xarch": xarch,
                     "xdj": xdj,
                     "ldPreload": ld_preload,
+                    "toolPath": tool_path,
                     "condaPrefix": "/opt/conda",
                     "shm": shm_size,
                     "privileged": privileged,
@@ -173,6 +178,7 @@ class VolcOperatorSimEnvironmentAdapter:
             shm_size=shm_size,
             config_hash=config_hash,
             ld_preload=ld_preload,
+            tool_path=tool_path,
             privileged=privileged,
             cpu_set=cpu_set,
             memory_nodes=memory_nodes,
@@ -293,6 +299,8 @@ class VolcOperatorSimEnvironmentAdapter:
                     config_hash=config_hash,
                     run_args=run_args,
                     privileged=privileged,
+                    cpu_set=cpu_set,
+                    memory_nodes=memory_nodes,
                     bootstrap_command=_raw_link_bootstrap(data_root),
                 ),
                 description=f"Start Volc benchmark container on {host_alias}",
@@ -434,6 +442,7 @@ def _docker_run_args(
     shm_size: str,
     config_hash: str,
     ld_preload: str,
+    tool_path: str,
     privileged: bool,
     cpu_set: str,
     memory_nodes: str,
@@ -484,6 +493,7 @@ def _docker_run_args(
         f"--label pyframework.volc.layout={CONTAINER_LAYOUT_VERSION} "
         f"-e VOLC_DE_BENCH_ROOT={shlex.quote(data_root)} "
         f"-e LD_PRELOAD={shlex.quote(ld_preload)} "
+        f"-e PATH={shlex.quote(tool_path)} "
         "-e CONDA_PREFIX=/opt/conda "
         f"{perf_lock_flags} "
         f"{mount_flags} {shlex.quote(image)} sleep infinity"
@@ -635,10 +645,18 @@ def _reconcile_container(
     config_hash: str,
     run_args: str,
     privileged: bool,
+    cpu_set: str,
+    memory_nodes: str,
     bootstrap_command: str,
 ) -> str:
     name = shlex.quote(container)
     expected_privileged = "true" if privileged else "false"
+    resource_reconcile = ""
+    if cpu_set and memory_nodes:
+        resource_reconcile = (
+            f"docker update --cpuset-cpus {shlex.quote(cpu_set)} "
+            f"--cpuset-mems {shlex.quote(memory_nodes)} {name} >/dev/null; "
+        )
     return (
         f"if docker inspect {name} >/dev/null 2>&1; then "
         f"current=$(docker inspect -f '{{{{.Config.Image}}}}' {name}); "
@@ -655,6 +673,7 @@ def _reconcile_container(
         f"running=$(docker inspect -f '{{{{.State.Running}}}}' {name}); "
         f"if [ \"$running\" != true ]; then docker start {name}; fi; "
         f"else {run_args}; fi; "
+        f"{resource_reconcile}"
         f"docker exec {name} bash -lc {shlex.quote(bootstrap_command)}"
     )
 

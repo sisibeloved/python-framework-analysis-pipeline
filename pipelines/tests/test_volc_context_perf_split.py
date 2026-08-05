@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from pyframework_pipeline.adapters.volcoperatorsim.context_perf_split import (
+    _context_perf_data,
     _perf_report_command,
     build_operator_windows,
     clock_offset_seconds,
@@ -14,6 +15,33 @@ from pyframework_pipeline.adapters.volcoperatorsim.context_perf_split import (
 
 
 class VolcContextPerfSplitTest(unittest.TestCase):
+    def test_context_perf_data_is_bound_to_requested_engine_and_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            daft = (
+                root
+                / "20260804_120000/aarch64/daft_ray"
+                / "pipeline_context__audio_asr_prep_canonical__daft_ray"
+                / "perf.data"
+            )
+            datajuicer = (
+                root
+                / "20260804_130000/aarch64/datajuicer_native"
+                / "pipeline_context__audio_asr_prep_canonical__datajuicer_native"
+                / "perf.data"
+            )
+            for path in (daft, datajuicer):
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"perf")
+
+            selected = _context_perf_data(
+                root,
+                "audio_asr_prep_canonical",
+                "daft_ray",
+            )
+
+        self.assertEqual(selected, daft)
+
     def test_perf_report_uses_the_capture_buildid_cache(self) -> None:
         command = _perf_report_command(
             real_perf="/usr/bin/perf",

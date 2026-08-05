@@ -1,7 +1,7 @@
 # Volc Operator Sim workload
 
 This reference keeps the target repository black-boxed at commit
-`56d3b6856895427a0519cbaa437d55443fcb578b`. The adapter reads task definitions
+`c0c52fd514510bc223d76767e55bcefbc190033c`. The adapter reads task definitions
 from that checkout and writes all derived tasks under the Host-persistent
 `/home/lxy/de_bench_full/operator-cache` mount; it never modifies the checkout.
 

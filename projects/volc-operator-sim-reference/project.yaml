@@ -20,6 +20,15 @@ workload:
       - pipeline_pdf_full_min
       - pipeline_ad_nuscenes_min
     inputOverrides:
+      pipeline_text_fineweb_full_min:
+        kind: lance
+        field: text
+        path: fixtures/text/scale/fineweb_edu_50k_p4/dataset_p4.lance
+        jsonl_mirror: fixtures/text/scale/fineweb_edu_50k_p4/dataset.jsonl
+        manifest_path: fixtures/text/scale/fineweb_edu_50k_p4/fixture-manifest.json
+        fixture_id: fineweb_edu_50k_p4
+        rows: 50000
+        input_fingerprint: sha256:586d8cac2e8665beeae328b572b3e0c262fc007d6bf9685676d7a2d31c67a6ec
       video_scene_split_etl:
         kind: lance
         modality: video
@@ -28,21 +37,84 @@ workload:
         jsonl_mirror: fixtures/canonical/panda_70m_video.mirror.jsonl
         mirror_meta: fixtures/canonical/panda_70m_video.mirror.meta.json
         source_dataset: panda_70m
+        fixture_id: panda_70m_video_official_long_videos_v1
+        rows: 8
+        input_fingerprint: sha256:cad57d309f3fcadfbc721887eac25766d4d5b63053d7bc89b2c25a4d7ae306e3
       audio_asr_prep_canonical:
         kind: lance
         modality: audio
         field: file_path
-        path: fixtures/canonical/common_voice_audio.lance
-        jsonl_mirror: fixtures/canonical/common_voice_audio.mirror.jsonl
-        mirror_meta: fixtures/canonical/common_voice_audio.mirror.meta.json
+        path: fixtures/audio/scale/common_voice_cv26_en_test_512/common_voice_cv26_en_test_512_audio.lance
+        jsonl_mirror: fixtures/audio/scale/common_voice_cv26_en_test_512/common_voice_cv26_en_test_512_audio.mirror.jsonl
+        mirror_meta: fixtures/audio/scale/common_voice_cv26_en_test_512/common_voice_cv26_en_test_512_audio.mirror.meta.json
         source_dataset: common_voice
+        fixture_id: common_voice_cv26_en_test_512
+        rows: 512
+        input_fingerprint: sha256:b6114e0eb8ca83265cb52732651396b8feb4ab86e0770369e34375b75bee5e4c
+      pipeline_image_full_min:
+        kind: file_manifest
+        modality: image
+        field: file_path
+        path: fixtures/image/scale/coco_val2017_5k/manifest.jsonl
+        manifest_path: fixtures/image/scale/coco_val2017_5k/manifest.jsonl
+        mirror_meta: fixtures/image/scale/coco_val2017_5k/manifest.mirror.meta.json
+        source_dataset: coco2017
+        fixture_id: coco_val2017_5k
+        rows: 5000
+        input_fingerprint: sha256:c01ba8a94b59fb8288f4f0da5b948daae6c1d194ca3d9c02402c229b10baf8e7
+      pipeline_pdf_full_min:
+        kind: lance
+        field: file_path
+        path: fixtures/pdf/scale/pmc_pdf_hash4/pdfs_p4.lance
+        jsonl_mirror: fixtures/pdf/scale/pmc_pdf_hash4/manifest.jsonl
+        manifest_path: fixtures/pdf/scale/pmc_pdf_hash4/fixture-manifest.json
+        fixture_id: pmc_pdf_hash4
+        rows: 4
+        input_fingerprint: sha256:2ae67663b803198f9e6e22671ae9067b227db4e3763783d3652d8f6be4a34fa4
+      pipeline_ad_nuscenes_min:
+        kind: file_manifest
+        field: file_path
+        path: fixtures/ad/scale/nuscenes_cam_front_5m/manifest.jsonl
+        manifest_path: fixtures/ad/scale/nuscenes_cam_front_5m/manifest.jsonl
+        fixture_id: nuscenes_cam_front_5m
+        rows: 5000000
+        input_fingerprint: sha256:891fba38c95045eb729daf183b6463192e23ec4937ea424ee9292806cbec2500
     contextTiming: true
-    isolatedTiming: true
+    contextPerf:
+      enabled: true
+      splitByOperatorBoundary: true
+      perfFrequency: 249
+      fastOperatorMinSamples: 5000
+      fastOperatorCalls:
+        audio_duration_filter: 1536
+        clean_html_mapper: 3500000
+        clean_links_mapper: 125000
+        clean_copyright_mapper: 100000
+        fix_unicode_mapper: 500000
+        whitespace_normalization_mapper: 70000
+        text_length_filter: 20000000
+        document_deduplicator: 12
+        text_chunk_mapper: 150000
+        bge_vectorize_mapper: 32
+        download_file_mapper: 4000000
+        image_shape_filter: 6000
+        image_aspect_ratio_filter: 6000
+        image_size_filter: 1800000
+        image_aesthetics_filter: 3600000
+        image_text_similarity_filter: 3600000
+        image_clip_vectorize_mapper: 8000000
+        video_resize_resolution_mapper: 640
+        video_duration_filter: 400
+        video_split_by_duration_mapper: 32
+        video_extract_frames_mapper: 128
+    isolatedTiming: false
     profiling: true
-    warmup: 1
-    rounds: 3
+    warmup: 0
+    rounds: 1
     minPerfSamples: 5000
     topSymbols: 20
+    unblockPerf: true
+    representativeProfile: true
 bridge:
   repo: XuanYuL5/volc_operator_sim
   platform: gitcode

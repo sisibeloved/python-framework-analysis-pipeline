@@ -25,6 +25,7 @@ from pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle import (
     _populate_perf_buildid_cache,
     _select_workload_affinity,
     _symbol_lookup_keys,
+    inspect_elf,
     index_raw_perf_lines,
     build_raw_sample_index,
     parse_proc_maps,
@@ -750,6 +751,52 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
             {"sha256:real": {"period": 100, "sampleCount": 1}},
         )
 
+    def test_raw_mmap_manifest_is_indexed_once_for_repeated_events(self) -> None:
+        class CountingMappings(list[dict[str, object]]):
+            iterations = 0
+
+            def __iter__(self):  # type: ignore[override]
+                self.iterations += 1
+                return super().__iter__()
+
+        mappings = CountingMappings(
+            [
+                {
+                    "pid": 111,
+                    "tids": [111, 222],
+                    "start": "0x7000",
+                    "end": "0x8000",
+                    "offset": "0x0",
+                    "device": "00:00",
+                    "inode": 0,
+                    "objectId": "sha256:real",
+                    "deleted": True,
+                }
+            ]
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "sha256:real": {
+                    "identityEvidence": "procfs-map-files",
+                    "originalPath": "/",
+                }
+            },
+            "mappings": mappings,
+        }
+        mmap = (
+            "1 0x20 [0x68]: PERF_RECORD_MMAP2 111/111: "
+            "[0x7000(0x1000) @ 0 00:00 0 0]: r-xp / (deleted)\n"
+        )
+
+        index_raw_perf_lines([mmap, mmap], manifest)
+
+        self.assertEqual(
+            mappings.iterations,
+            2,
+            "captured-IP and raw-MMAP indexes should each scan the manifest once",
+        )
+
     def test_raw_build_id_conflict_does_not_reuse_path_cached_object(self) -> None:
         manifest = {
             "schemaVersion": 1,
@@ -955,6 +1002,65 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
         self.assertEqual(manifest["status"], "complete")
         self.assertTrue(manifest["mappings"][0]["objectId"])
 
+    def test_collector_finalizes_one_copy_per_stable_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc_root = root / "proc"
+            for pid, start in ((88, 0x500000), (99, 0x700000)):
+                process = proc_root / str(pid)
+                (process / f"task/{pid}").mkdir(parents=True)
+                (process / "maps").write_text(
+                    f"{start:08x}-{start + 0x52000:08x} r-xp 00000000 "
+                    f"08:01 456 {sys.executable}\n",
+                    encoding="utf-8",
+                )
+            collector = DeletedMappingCollector(
+                cache_root=root / "bundle", proc_root=proc_root
+            )
+
+            with patch(
+                "pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle."
+                "inspect_elf",
+                wraps=inspect_elf,
+            ) as inspect:
+                collector.scan()
+                collector.finalize()
+
+            manifest = collector.manifest(perf_data=root / "case/perf.data")
+
+        self.assertEqual(inspect.call_count, 1)
+        self.assertEqual(
+            len({item["objectId"] for item in manifest["mappings"]}), 1
+        )
+
+    def test_collector_rejects_non_elf_mapping_before_bulk_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "jit-cache.bin"
+            source.write_bytes(b"not-elf" + b"x" * (1024 * 1024))
+            collector = DeletedMappingCollector(cache_root=root / "bundle")
+            mapping = ProcMap(
+                pid=77,
+                tids=(77,),
+                start=0x1000,
+                end=0x2000,
+                permissions="r-xp",
+                offset=0,
+                device="00:01",
+                inode=123,
+                path="/tmp/jit-cache.bin",
+                deleted=True,
+            )
+
+            with patch(
+                "pyframework_pipeline.adapters.volcoperatorsim.perf_symbol_bundle."
+                "shutil.copyfileobj"
+            ) as copy:
+                object_id = collector._capture_source(source, mapping)
+
+        self.assertEqual(object_id, "")
+        copy.assert_not_called()
+
     def test_collector_retries_when_a_stable_mapping_later_becomes_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1078,8 +1184,8 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
             root = Path(tmp)
             first = root / "first.elf"
             second = root / "second.elf"
-            first.write_bytes(b"first")
-            second.write_bytes(b"second")
+            first.write_bytes(b"\x7fELFfirst")
+            second.write_bytes(b"\x7fELFsecond")
             collector = DeletedMappingCollector(cache_root=root / "bundle")
             common = {
                 "pid": 77,
@@ -1133,6 +1239,29 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
 
         self.assertEqual(manifest["status"], "incomplete")
         self.assertEqual(len(manifest["captureErrors"]), 1)
+
+    def test_collector_ignores_transient_runc_control_mapping(self) -> None:
+        """A docker-exec runc trampoline is not part of the sampled workload."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc_root = root / "proc"
+            process = proc_root / "77"
+            (process / "task/77").mkdir(parents=True)
+            (process / "maps").write_text(
+                "00400000-00452000 r-xp 00000000 00:01 123 "
+                "/memfd:runc_cloned:/proc/self/exe (deleted)\n",
+                encoding="utf-8",
+            )
+            collector = DeletedMappingCollector(
+                cache_root=root / "bundle", proc_root=proc_root
+            )
+
+            collector.scan()
+            manifest = collector.manifest(perf_data=root / "case/perf.data")
+
+        self.assertEqual(manifest["deletedMappingsObserved"], 0)
+        self.assertEqual(manifest["captureErrors"], [])
 
     def test_parse_proc_maps_preserves_deleted_executable_identity(self) -> None:
         records = parse_proc_maps(
@@ -1209,6 +1338,53 @@ class VolcPerfSymbolBundleTest(unittest.TestCase):
         self.assertEqual(summary["resolvedDeletedRows"], 1)
         self.assertEqual(summary["unresolvedDeletedRows"], 0)
         self.assertEqual(summary["status"], "complete")
+
+    def test_resolve_period_report_indexes_large_mapping_manifest_once(self) -> None:
+        class CountingMappings(list[dict[str, object]]):
+            iterations = 0
+
+            def __iter__(self):  # type: ignore[override]
+                self.iterations += 1
+                return super().__iter__()
+
+        mappings = CountingMappings(
+            [
+                {
+                    "pid": 77,
+                    "tids": [77, 79],
+                    "start": "0x7f00000000",
+                    "end": "0x7f00100000",
+                    "offset": "0x2000",
+                    "objectId": "buildid:abc",
+                    "deleted": True,
+                }
+            ]
+        )
+        manifest = {
+            "schemaVersion": 1,
+            "objects": {
+                "buildid:abc": {
+                    "cachePath": "objects/abc.elf",
+                    "soname": "libworker.so",
+                    "identityEvidence": "procfs-map-files",
+                }
+            },
+            "mappings": mappings,
+        }
+        report = (
+            " 50.00%|500|5|worker|79:worker|(deleted)|[.] unknown|0x7f00001234\n"
+            " 50.00%|500|5|worker|79:worker|(deleted)|[.] unknown|0x7f00005678\n"
+        )
+
+        _, summary = resolve_period_report(
+            report,
+            manifest,
+            bundle_root=Path("/bundle"),
+            symbolizer=lambda _path, address: (f"symbol_{address:x}", ""),
+        )
+
+        self.assertEqual(summary["resolvedDeletedRows"], 2)
+        self.assertEqual(mappings.iterations, 1)
 
     def test_legacy_buildid_label_without_identity_evidence_is_not_trusted(self) -> None:
         report = (
